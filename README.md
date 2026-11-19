@@ -145,17 +145,11 @@ You can also open `StarLocator.sln` in an IDE that supports .NET 10 Android proj
 
 | Trigger | What happens |
 |---|---|
-| Push to `main`, pull request, or manual run | Runs the solver tests, builds the APK, checks its signature, package and permissions, and uploads it as a **workflow artifact** |
-| Push a tag `v*` (e.g. `v1.1.0`) | Everything above, **plus a GitHub Release** with `StarLocator-<version>.apk` and its `.sha256` attached |
+| **Push to `main`** (or a manual run on `main`) | Runs the solver tests, builds the APK, checks its signature, package and permissions, uploads it as a workflow artifact, and **publishes a GitHub Release `v1.0.<run number>`** with `StarLocator-<version>.apk` and its `.sha256` |
+| Push a tag `v*` (e.g. `v1.1.0`) | The same, but the release uses that exact version |
+| Pull request | Tests and build only, no release |
 
-To publish a new version:
-
-```bash
-git tag v1.1.0
-git push origin v1.1.0
-```
-
-The release's `versionName` comes from the tag. Its `versionCode` is the workflow run number, so it always increases.
+So every change merged to `main` automatically produces a new downloadable APK under [Releases](https://github.com/theJaraxleNUKE/StarLocator/releases). The `versionCode` is the workflow run number, so it always increases. To change the `1.0` prefix, edit `VERSION_PREFIX` in the workflow.
 
 ### Signing key (recommended)
 

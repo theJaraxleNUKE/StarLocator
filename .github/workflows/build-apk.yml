@@ -1,7 +1,9 @@
 name: Build APK
 
-# Every push / PR: run the solver test suite and build the APK (downloadable as a workflow artifact).
-# Pushing a tag like v1.2.3: additionally publish a GitHub Release with the APK attached.
+# Every run: run the solver test suite, build the APK, verify it and upload it as a workflow artifact.
+# Push to main (or manual run on main): publish a GitHub Release "v<VERSION_PREFIX>.<run number>" with the APK.
+# Push of a tag like v1.2.3: publish a GitHub Release for that exact version.
+# Pull requests: build and test only, no release.
 on:
   push:
     branches: [ main ]
@@ -21,6 +23,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
+      VERSION_PREFIX: '1.0'
       DOTNET_CLI_TELEMETRY_OPTOUT: 1
       DOTNET_NOLOGO: 1
       ANDROID_SIGNING_PASSWORD: ${{ secrets.ANDROID_SIGNING_PASSWORD }}
@@ -57,11 +60,17 @@ jobs:
         id: ver
         run: |
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            echo "display=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+            DISPLAY="${GITHUB_REF_NAME#v}"; RELEASE=true
+          elif [[ "$GITHUB_REF" == refs/heads/main && "$GITHUB_EVENT_NAME" != pull_request ]]; then
+            DISPLAY="${VERSION_PREFIX}.${GITHUB_RUN_NUMBER}"; RELEASE=true
           else
-            echo "display=0.0.${GITHUB_RUN_NUMBER}-dev" >> "$GITHUB_OUTPUT"
+            DISPLAY="${VERSION_PREFIX}.${GITHUB_RUN_NUMBER}-pr"; RELEASE=false
           fi
+          echo "display=$DISPLAY" >> "$GITHUB_OUTPUT"
+          echo "tag=v$DISPLAY" >> "$GITHUB_OUTPUT"
+          echo "release=$RELEASE" >> "$GITHUB_OUTPUT"
           echo "code=${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+          echo "Version $DISPLAY (versionCode ${GITHUB_RUN_NUMBER}), release: $RELEASE"
 
       - name: Prepare signing key
         env:
@@ -114,10 +123,13 @@ jobs:
             ${{ steps.apk.outputs.file }}.sha256
 
       - name: Publish GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: steps.ver.outputs.release == 'true'
         uses: softprops/action-gh-release@v3
         with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          target_commitish: ${{ github.sha }}
           name: Star Locator ${{ steps.ver.outputs.display }}
+          make_latest: 'true'
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: |
