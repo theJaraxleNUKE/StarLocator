@@ -50,8 +50,14 @@ namespace StarLocator.Core
     {
         public double LatitudeDeg { get; init; }
         public double LongitudeDeg { get; init; }
-        /// <summary>Estimated 1-sigma horizontal error (km).</summary>
+        /// <summary>Estimated 1-sigma horizontal error (km): sqrt(random^2 + systematic^2).</summary>
         public double UncertaintyKm { get; init; }
+        /// <summary>Part of the error that differs frame to frame (star noise, accelerometer noise); averages down.</summary>
+        public double RandomUncertaintyKm { get; init; }
+        /// <summary>Part shared by all frames of a pose (accelerometer bias, camera tilt); does not average down.</summary>
+        public double SystematicUncertaintyKm { get; init; }
+        /// <summary>Number of frames combined into this fix (1 for a single frame).</summary>
+        public int FramesUsed { get; init; } = 1;
         public Vec3 AccelBias { get; init; }
         public bool BiasEstimated { get; init; }
         /// <summary>Calibration learned by a multi-shot solve (null for single shots).</summary>
@@ -109,13 +115,16 @@ namespace StarLocator.Core
             double attErr = AttitudeSigmaRad(shot);
             double noise = shot.Gravity.StdDev / Math.Max(1.0, Math.Sqrt(shot.Gravity.Samples / 5.0)) / StandardGravity;
             double tilt = (calibration != null ? AssumedCalibratedTiltErrorDeg : AssumedUncalibratedTiltErrorDeg) * Astronomy.DegToRad;
-            double sigma = Math.Sqrt(attErr * attErr + noise * noise + tilt * tilt);
+            double random = Math.Sqrt(attErr * attErr + noise * noise);
+            double sigma = Math.Sqrt(random * random + tilt * tilt);
 
             return new PositionFix
             {
                 LatitudeDeg = lat * Astronomy.RadToDeg,
                 LongitudeDeg = Astronomy.WrapDeg180(lon * Astronomy.RadToDeg),
                 UncertaintyKm = sigma * Astronomy.EarthRadiusKm,
+                RandomUncertaintyKm = random * Astronomy.EarthRadiusKm,
+                SystematicUncertaintyKm = tilt * Astronomy.EarthRadiusKm,
                 AccelBias = bias,
                 BiasEstimated = false,
                 ShotCount = 1,
@@ -231,7 +240,9 @@ namespace StarLocator.Core
             double att = 0;
             foreach (Shot s in shots) { double a2 = AttitudeSigmaRad(s); att += a2 * a2; }
             att = Math.Sqrt(att) / shots.Count;
-            double sigma = Math.Sqrt(horiz * horiz + att * att + Math.Pow(AssumedCalibratedTiltErrorDeg * Astronomy.DegToRad, 2));
+            double randomM = Math.Sqrt(horiz * horiz + att * att);
+            double systematicM = AssumedCalibratedTiltErrorDeg * Astronomy.DegToRad;
+            double sigma = Math.Sqrt(randomM * randomM + systematicM * systematicM);
 
             var cal = new SensorCalibration
             {
@@ -246,6 +257,9 @@ namespace StarLocator.Core
                 LatitudeDeg = lat * Astronomy.RadToDeg,
                 LongitudeDeg = Astronomy.WrapDeg180(lon * Astronomy.RadToDeg),
                 UncertaintyKm = sigma * Astronomy.EarthRadiusKm,
+                RandomUncertaintyKm = randomM * Astronomy.EarthRadiusKm,
+                SystematicUncertaintyKm = systematicM * Astronomy.EarthRadiusKm,
+                FramesUsed = shots.Count,
                 AccelBias = bias,
                 BiasEstimated = true,
                 ShotCount = shots.Count,
@@ -253,6 +267,117 @@ namespace StarLocator.Core
                 Notes = message
             };
         }
+
+        /// <summary>
+        /// Combines single-frame fixes taken from ONE phone pose (an exposure bracket / burst).
+        /// Outliers (e.g. a frame where the phone was bumped) are rejected against a robust centre,
+        /// the rest are averaged with 1/random-variance weights. Only the random error shrinks with
+        /// more frames; the systematic part (shared tilt error) is carried through unchanged.
+        /// </summary>
+        public static PositionFix? CombineFixes(IReadOnlyList<PositionFix> fixes, out string message)
+        {
+            message = "";
+            if (fixes.Count == 0) { message = "No frames could be solved."; return null; }
+            if (fixes.Count == 1) { message = "1 frame solved."; return fixes[0]; }
+
+            var units = new Vec3[fixes.Count];
+            for (int i = 0; i < fixes.Count; i++)
+                units[i] = Vec3.FromSpherical(fixes[i].LongitudeDeg * Astronomy.DegToRad, fixes[i].LatitudeDeg * Astronomy.DegToRad);
+
+            // Robust centre: geometric median on the sphere (Weiszfeld iterations on unit vectors).
+            Vec3 centre = Vec3.Zero;
+            foreach (Vec3 u in units) centre += u;
+            centre = centre.Normalized();
+            for (int it = 0; it < 50; it++)
+            {
+                Vec3 acc = Vec3.Zero;
+                double wsum = 0;
+                foreach (Vec3 u in units)
+                {
+                    double d = Math.Max(Vec3.Angle(u, centre), 1e-9);
+                    acc += u / d; wsum += 1 / d;
+                }
+                Vec3 next = (acc / wsum).Normalized();
+                if (Vec3.Angle(next, centre) < 1e-12) { centre = next; break; }
+                centre = next;
+            }
+
+            var distKm = new double[fixes.Count];
+            for (int i = 0; i < fixes.Count; i++) distKm[i] = Vec3.Angle(units[i], centre) * Astronomy.EarthRadiusKm;
+
+            var keep = new bool[fixes.Count];
+            int rejected = 0;
+            if (fixes.Count >= 3)
+            {
+                double[] sortedD = (double[])distKm.Clone();
+                Array.Sort(sortedD);
+                var sortedR = new double[fixes.Count];
+                for (int i = 0; i < fixes.Count; i++) sortedR[i] = Math.Max(fixes[i].RandomUncertaintyKm, 0.1);
+                Array.Sort(sortedR);
+                double scale = Math.Max(1.4826 * Median(sortedD), Median(sortedR));
+                for (int i = 0; i < fixes.Count; i++)
+                {
+                    keep[i] = distKm[i] <= 3.0 * scale;
+                    if (!keep[i]) rejected++;
+                }
+            }
+            else
+            {
+                for (int i = 0; i < fixes.Count; i++) keep[i] = true;
+            }
+
+            Vec3 sum = Vec3.Zero;
+            double wTotal = 0, sysSum = 0;
+            int used = 0;
+            for (int i = 0; i < fixes.Count; i++)
+            {
+                if (!keep[i]) continue;
+                double r = Math.Max(fixes[i].RandomUncertaintyKm, 0.1);
+                double w = 1.0 / (r * r);
+                sum += units[i] * w;
+                wTotal += w;
+                sysSum += fixes[i].SystematicUncertaintyKm;
+                used++;
+            }
+            Vec3 mean = sum.Normalized();
+            (double lon, double lat) = mean.ToSpherical();
+
+            double randomKm = 1.0 / Math.Sqrt(wTotal);
+            if (used >= 3)
+            {
+                // If the frames scatter more than their claimed noise, trust the scatter.
+                double s2 = 0;
+                for (int i = 0; i < fixes.Count; i++)
+                {
+                    if (!keep[i]) continue;
+                    double r = Math.Max(fixes[i].RandomUncertaintyKm, 0.1);
+                    double d = Vec3.Angle(units[i], mean) * Astronomy.EarthRadiusKm;
+                    s2 += d * d / (r * r);
+                }
+                double empirical = Math.Sqrt(s2 / wTotal / (used - 1));
+                randomKm = Math.Max(randomKm, empirical);
+            }
+            double systematicKm = sysSum / used;
+
+            message = $"Combined {used} of {fixes.Count} frames" + (rejected > 0 ? $" ({rejected} rejected as outliers)." : ".");
+            PositionFix first = fixes[0];
+            return new PositionFix
+            {
+                LatitudeDeg = lat * Astronomy.RadToDeg,
+                LongitudeDeg = Astronomy.WrapDeg180(lon * Astronomy.RadToDeg),
+                UncertaintyKm = Math.Sqrt(randomKm * randomKm + systematicKm * systematicKm),
+                RandomUncertaintyKm = randomKm,
+                SystematicUncertaintyKm = systematicKm,
+                FramesUsed = used,
+                AccelBias = first.AccelBias,
+                BiasEstimated = false,
+                ShotCount = 1,
+                Notes = message + " " + first.Notes
+            };
+        }
+
+        private static double Median(double[] sorted) =>
+            sorted.Length % 2 == 1 ? sorted[sorted.Length / 2] : 0.5 * (sorted[sorted.Length / 2 - 1] + sorted[sorted.Length / 2]);
 
         private static double AttitudeSigmaRad(Shot s)
         {

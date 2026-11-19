@@ -41,14 +41,15 @@ Each release also has a `.sha256` file for checking the download.
 ## Using the app
 
 1. **Go outside on a clear night.** Avoid the Moon and bright lights. The interface is dim red so it doesn't spoil your night vision.
-2. **Brace the phone** so it can't move: on a rock, car roof, wall or tripod. Point the back camera **45–90° up** at clear sky. The live "camera elevation" readout helps you aim.
-3. Tap **CAPTURE**. The defaults are a **4 s** exposure at **ISO 1600**; both are clamped to what the camera supports. Don't touch the phone until the result appears.
+2. Set the **countdown** (Off / 5 s / 10 s, default 10 s), then tap **CAPTURE**. While it beeps once a second, put the phone **screen-down** on a rock, car roof, wall or tripod so the back camera points **45–90° up** at clear sky. A higher "go" tone marks the start; after it, don't touch the phone.
+3. With **Exposure bracket** on (the default), the app takes 4 frames at ¼×, ½×, 1× and 2× the set exposure. With the defaults of **4 s** at **ISO 1600** that is 1, 2, 4 and 8 s, clamped to what the camera supports. Each frame is solved on its own. Frames that fail are skipped, outliers (for example a frame where the phone was bumped) are rejected, and the rest are combined into one fix. A long tone means capturing is done and you can pick the phone up. CAPTURE turns into **CANCEL** while a capture is running.
 4. Read the result:
    - latitude/longitude in degrees-minutes-seconds and decimal degrees;
    - an estimated 1-σ error in km;
-   - the photo with **identified stars circled in green and named**. Detections it couldn't match are circled in red.
+   - a per-frame report (stars detected and identified, motion warnings);
+   - the frame with the most identified stars, with **identified stars circled in green and named**. Detections it couldn't match are circled in red.
 5. **OPEN IN MAP** passes the fix to any installed map app as a `geo:` link. Offline map apps work.
-6. **Calibrate once for much better accuracy.** Take **4–6 shots**, tilting the phone differently for each (portrait, landscape, leaning left, leaning right), then tap **CALIBRATE**. This measures your phone's accelerometer bias and how far the camera sits off-square from the accelerometer. It is saved per camera and applied to every later single shot. **FORGET CALIBRATION** clears it.
+6. **Calibrate once for much better accuracy.** Do **4–6 captures**, tilting the phone differently for each (portrait, landscape, leaning left, leaning right), then tap **CALIBRATE**. This measures your phone's accelerometer bias and how far the camera sits off-square from the accelerometer. It is saved per camera and applied to every later single shot. **FORGET CALIBRATION** clears it.
 7. Optional: tick **Save frames for PC replay**. Each frame is then written as `.pgm` + `.txt` to `Android/data/io.github.thejaraxlenuke.starlocator/files/frames/` so you can re-solve it on a PC (see [Building from source](#building-from-source)).
 
 If too few stars are found, increase the exposure or ISO, or find a darker spot.
@@ -76,7 +77,8 @@ The star tracker comes from **Marbel, Ben-Moshe & Yozevitch, "Star-Tracker Algor
 | 5 | **Refinement.** Least-squares orientation (Davenport q-method) over all matched stars down to magnitude 5.5. The focal length (±8%) and radial distortion K1 are self-calibrated from the stars, and focal scales 0.90–1.10 are tried if the first attempt fails. | `StarIdentifier.cs`, `Attitude.cs` |
 | 6 | **Gravity → zenith.** The accelerometer is averaged over exactly the exposure window to give "up" in the phone frame. Atmospheric refraction is removed per star (Bennett). The solved orientation maps "up" onto the sky. | `PositionSolver.cs`, `Astronomy.cs` |
 | 7 | **Zenith → latitude/longitude.** The zenith is precessed from J2000 to the date (IAU 1976) and rotated by Greenwich Mean Sidereal Time. **Latitude = declination of the zenith; longitude = its right ascension − GMST.** | `Astronomy.cs` |
-| 8 | **Phone calibration** (multi-shot). Model per shot: `a = (I − [w×])·M·v + b`. A Gauss-Newton fit over 4+ shots solves for the position `v`, the accelerometer bias `b` and the camera-to-accelerometer misalignment `w` (9 unknowns); 3 shots solve for `v` and `b` only. Badly conditioned shot sets are rejected with a message. | `PositionSolver.cs` |
+| 8 | **Exposure bracket.** Each frame of a capture is solved on its own. Fixes are checked against a robust centre (geometric median); frames more than 3× the robust spread away are rejected; the rest are averaged with 1/σ² weights. Only the random error shrinks with more frames. The systematic part (shared tilt error) is carried through unchanged, so the ± figure stays honest. | `PositionSolver.CombineFixes` |
+| 9 | **Phone calibration** (multi-shot). Model per shot: `a = (I − [w×])·M·v + b`. A Gauss-Newton fit over 4+ shots solves for the position `v`, the accelerometer bias `b` and the camera-to-accelerometer misalignment `w` (9 unknowns); 3 shots solve for `v` and `b` only. Badly conditioned shot sets are rejected with a message. | `PositionSolver.cs` |
 
 Camera intrinsics come from Android's factory `LENS_INTRINSIC_CALIBRATION` when the phone provides it. Otherwise they come from focal length ÷ sensor size. Lens distortion is corrected by the camera itself where supported, and otherwise from `LENS_DISTORTION`. Exposure uses Camera2 manual mode with focus at infinity, reading the raw luminance (Y) plane.
 
@@ -96,6 +98,15 @@ All figures below come from the test suite in `tests/StarLocator.Tests`. It rend
 | 10 px (0.19°) | 36 / 40 | 0 | 5.7 km | 12.2 km |
 
 Pure noise fields with random blobs gave **0 false fixes in 30 trials**.
+
+**Exposure bracket at one pose** (frames reaching magnitude 3.5 / 4.0 / 4.5 / 5.0, 6 px star noise), plus a fifth frame where the phone was bumped:
+
+| Frame | Result |
+|---|---|
+| 1 s (mag 3.5) | not solved: too few stars (the bracket covers for this) |
+| 2 s / 4 s / 8 s | 2.3 / 2.5 / 2.9 km error |
+| bumped frame | 270 km error, **rejected automatically** |
+| **Combined** | **1.1 km** |
 
 **With realistic phone errors** (accelerometer bias 0.15 m/s² ≈ 0.9°, camera mounting error 0.4°, principal point off by 20 px):
 

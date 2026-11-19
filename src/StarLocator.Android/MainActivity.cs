@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using Android.App;
 using Android.Content;
@@ -31,7 +32,12 @@ namespace StarLocator.Droid
         private TextureView _preview = null!;
         private EditText _exposure = null!, _iso = null!;
         private Button _captureBtn = null!, _calibrateBtn = null!, _clearBtn = null!, _mapBtn = null!, _forgetBtn = null!;
-        private CheckBox _saveFrames = null!;
+        private CheckBox _saveFrames = null!, _bracket = null!;
+        private RadioButton _delayOff = null!, _delay5 = null!, _delay10 = null!;
+        private Android.Media.ToneGenerator? _tone;
+        private CancellationTokenSource? _cts;
+        /// <summary>Number of distinct phone poses (captures) in _shots; calibration needs several.</summary>
+        private int _poses;
         private TextView _status = null!, _result = null!, _tilt = null!;
         private ImageView _image = null!;
 
@@ -70,6 +76,13 @@ namespace StarLocator.Droid
             if (CheckSelfPermission(Android.Manifest.Permission.Camera) != Permission.Granted)
                 RequestPermissions(new[] { Android.Manifest.Permission.Camera }, CameraPermissionRequest);
             else if (_surface != null) OpenCamera();
+        }
+
+        protected override void OnDestroy()
+        {
+            _tone?.Release();
+            _tone = null;
+            base.OnDestroy();
         }
 
         protected override void OnPause()
@@ -140,55 +153,116 @@ namespace StarLocator.Droid
 
         private async void OnCapture()
         {
-            if (_busy || _camera == null) return;
+            if (_busy) { _cts?.Cancel(); return; }   // the CAPTURE button doubles as CANCEL
+            if (_camera == null) return;
             if (!_camera.IsReady) { SetStatus("Camera is still starting…"); return; }
+            CameraInfo? info = _camera.Info;
+            if (info == null) return;
+
             _busy = true;
+            _cts = new CancellationTokenSource();
+            CancellationToken token = _cts.Token;
             UpdateButtons();
             try
             {
                 double expS = ParseDouble(_exposure.Text, 4.0);
                 int iso = (int)ParseDouble(_iso.Text, 1600);
-                SetStatus($"Exposing {expS:0.#} s at ISO {iso}… keep the phone perfectly still.");
+                long[] exposures = BuildExposures((long)(expS * 1e9), _bracket.Checked, info);
 
-                CapturedFrame frame = await _camera.CaptureAsync((long)(expS * 1e9), iso);
-                // Let the accelerometer cover the full exposure window.
-                await Task.Delay(100);
-                GravityMeasurement? g = _gravity.Average(frame.StartRealtimeNs, frame.EndRealtimeNs);
-                if (g == null) { SetStatus("No accelerometer data during the exposure."); return; }
-
-                var warn = new StringBuilder();
-                if (g.StdDev > 0.06) warn.Append($"⚠ Phone moved during exposure (σ {g.StdDev:F2} m/s²): result may be degraded.\n");
-                if (!frame.PreciseTiming) warn.Append("Exposure time estimated (camera timestamps not in realtime base).\n");
-
-                SetStatus($"Got {frame.Width}x{frame.Height} frame ({frame.CameraModelSource}). Identifying stars…");
-                CelestialLocator locator = await _locatorTask;
-                SensorCalibration? cal = _calibration;
-                FrameResult result = await Task.Run(() =>
-                    locator.ProcessFrame(frame.Luma, frame.Width, frame.Height, frame.RowStride, frame.Camera, g, frame.UtcMidExposure, cal));
-
-                Bitmap bmp = await Task.Run(() => ResultRenderer.Render(frame, result, 1440));
-                _image.SetImageBitmap(bmp);
-
-                if (_saveFrames.Checked)
+                // ---- Countdown so the phone can be placed camera-up (screen facing down) ----------
+                int delay = _delay10.Checked ? 10 : _delay5.Checked ? 5 : 0;
+                for (int sLeft = delay; sLeft > 0; sLeft--)
                 {
-                    string path = await Task.Run(() => Storage.SaveFrame(this, frame, g));
-                    warn.Append("Saved " + path + "\n");
+                    _result.Text = $"Place the phone — capturing in {sLeft}…";
+                    Beep(Android.Media.Tone.PropBeep, 120);
+                    await Task.Delay(1000, token);
+                }
+                if (delay > 0)
+                {
+                    Beep(Android.Media.Tone.PropBeep2, 400);           // "go" signal, then let vibrations die down
+                    await Task.Delay(700, token);
                 }
 
-                if (result.Fix != null && result.Shot != null && result.Identification != null)
+                // ---- Capture every frame first (keeps the time the phone must stay still short) ---
+                var frames = new List<(CapturedFrame Frame, GravityMeasurement? G)>();
+                for (int i = 0; i < exposures.Length; i++)
                 {
-                    _shots.Add(result.Shot);
-                    _lastFix = result.Fix;
-                    ShowFix(result.Fix, $"{result.Identification.Matches.Count} stars identified (RMS {result.Identification.RmsDeg:F3}°, " +
-                                        $"focal ×{result.Identification.FocalScale:F3}, {result.Identification.ElapsedMs} ms).");
-                    SetStatus(warn + $"Shot {_shots.Count} stored. " +
-                              (_shots.Count >= 4 ? "Tap CALIBRATE to solve all shots together." :
-                               $"Take {4 - _shots.Count} more at different tilts to calibrate."));
+                    token.ThrowIfCancellationRequested();
+                    _result.Text = $"Exposing frame {i + 1}/{exposures.Length} ({exposures[i] / 1e9:0.##} s)… don't touch the phone";
+                    CapturedFrame frame = await _camera.CaptureAsync(exposures[i], iso);
+                    await Task.Delay(100);           // let accelerometer samples cover the full window
+                    frames.Add((frame, _gravity.Average(frame.StartRealtimeNs, frame.EndRealtimeNs)));
+                }
+                Beep(Android.Media.Tone.PropAck, 600);
+                _result.Text = "Done capturing — you can pick up the phone. Identifying stars…";
+
+                // ---- Solve each frame independently -----------------------------------------------
+                CelestialLocator locator = await _locatorTask;
+                SensorCalibration? cal = _calibration;
+                var report = new StringBuilder();
+                var fixes = new List<PositionFix>();
+                var newShots = new List<Shot>();
+                (CapturedFrame Frame, FrameResult Result)? best = null;
+                for (int i = 0; i < frames.Count; i++)
+                {
+                    (CapturedFrame frame, GravityMeasurement? g) = frames[i];
+                    string label = $"Frame {i + 1} ({frame.ExposureNs / 1e9:0.##} s): ";
+                    if (g == null) { report.Append(label).Append("no accelerometer data.\n"); continue; }
+                    FrameResult r = await Task.Run(() =>
+                        locator.ProcessFrame(frame.Luma, frame.Width, frame.Height, frame.RowStride, frame.Camera, g, frame.UtcMidExposure, cal));
+                    if (_saveFrames.Checked)
+                    {
+                        string path = await Task.Run(() => Storage.SaveFrame(this, frame, g));
+                        report.Append("Saved ").Append(path).Append('\n');
+                    }
+                    report.Append(label).Append(r.Detections.Count).Append(" detections, ");
+                    if (r.Fix != null && r.Shot != null && r.Identification != null)
+                    {
+                        report.Append($"{r.Identification.Matches.Count} identified, RMS {r.Identification.RmsDeg:F3}°");
+                        if (g.StdDev > 0.06) report.Append($", ⚠ moved (σ {g.StdDev:F2} m/s²)");
+                        report.Append('\n');
+                        fixes.Add(r.Fix);
+                        newShots.Add(r.Shot);
+                        if (best == null || r.Identification.Matches.Count > (best.Value.Result.Identification?.Matches.Count ?? -1))
+                            best = (frame, r);
+                    }
+                    else
+                    {
+                        report.Append(r.Message).Append('\n');
+                        if (best == null || best.Value.Result.Fix == null && r.Detections.Count > best.Value.Result.Detections.Count)
+                            best = (frame, r);
+                    }
+                }
+                frames.Clear();
+
+                if (best != null)
+                {
+                    var b = best.Value;
+                    Bitmap bmp = await Task.Run(() => ResultRenderer.Render(b.Frame, b.Result, 1440));
+                    _image.SetImageBitmap(bmp);
+                }
+
+                PositionFix? combined = PositionSolver.CombineFixes(fixes, out string combineMsg);
+                if (combined != null)
+                {
+                    _shots.AddRange(newShots);
+                    _poses++;
+                    _lastFix = combined;
+                    ShowFix(combined, combineMsg);
+                    report.Append($"Pose {_poses} stored. ").Append(_poses >= 4
+                        ? "Tap CALIBRATE to solve all poses together."
+                        : $"Take {4 - _poses} more at different tilts to calibrate.");
                 }
                 else
                 {
-                    SetStatus(warn + $"{result.Detections.Count} stars detected. " + result.Message);
+                    _result.Text = "No position: " + combineMsg;
+                    report.Append("Try a longer exposure, higher ISO, or a darker / clearer patch of sky.");
                 }
+                SetStatus(report.ToString());
+            }
+            catch (System.OperationCanceledException)
+            {
+                _result.Text = "Capture cancelled.";
             }
             catch (Exception ex)
             {
@@ -196,8 +270,36 @@ namespace StarLocator.Droid
             }
             finally
             {
+                _cts?.Dispose();
+                _cts = null;
                 _busy = false;
                 UpdateButtons();
+            }
+        }
+
+        /// <summary>Single exposure, or a ¼×, ½×, 1×, 2× bracket clamped to what the camera supports.</summary>
+        private static long[] BuildExposures(long baseNs, bool bracket, CameraInfo info)
+        {
+            double[] factors = bracket ? new[] { 0.25, 0.5, 1.0, 2.0 } : new[] { 1.0 };
+            var list = new List<long>();
+            foreach (double f in factors)
+            {
+                long e = Math.Clamp((long)(baseNs * f), info.MinExposureNs, info.MaxExposureNs);
+                if (!list.Contains(e)) list.Add(e);
+            }
+            return list.ToArray();
+        }
+
+        private void Beep(Android.Media.Tone tone, int ms)
+        {
+            try
+            {
+                _tone ??= new Android.Media.ToneGenerator(Android.Media.Stream.Notification, 90);
+                _tone.StartTone(tone, ms);
+            }
+            catch (Exception)
+            {
+                // Some devices refuse a ToneGenerator (e.g. audio focus); the countdown still works silently.
             }
         }
 
@@ -281,10 +383,27 @@ namespace StarLocator.Droid
             settings.AddView(_iso, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WrapContent, 1f));
             root.AddView(settings);
 
+            var delayRow = new LinearLayout(this) { Orientation = Orientation.Horizontal };
+            delayRow.AddView(Label("Countdown ", 15, false));
+            var delayGroup = new RadioGroup(this) { Orientation = Orientation.Horizontal };
+            _delayOff = MakeRadio("Off");
+            _delay5 = MakeRadio("5 s");
+            _delay10 = MakeRadio("10 s");
+            delayGroup.AddView(_delayOff);
+            delayGroup.AddView(_delay5);
+            delayGroup.AddView(_delay10);
+            _delay10.Checked = true;
+            delayRow.AddView(delayGroup);
+            root.AddView(delayRow);
+
+            _bracket = new CheckBox(this) { Text = "Exposure bracket: ¼×, ½×, 1×, 2× (each frame solved, fixes combined)", Checked = true };
+            _bracket.SetTextColor(Dim);
+            root.AddView(_bracket);
+
             var buttons = new LinearLayout(this) { Orientation = Orientation.Horizontal };
             _captureBtn = MakeButton("CAPTURE", (s, e) => OnCapture());
             _calibrateBtn = MakeButton("CALIBRATE", (s, e) => OnCalibrate());
-            _clearBtn = MakeButton("CLEAR SHOTS", (s, e) => { _shots.Clear(); SetStatus("Shots cleared."); UpdateButtons(); });
+            _clearBtn = MakeButton("CLEAR SHOTS", (s, e) => { _shots.Clear(); _poses = 0; SetStatus("Shots cleared."); UpdateButtons(); });
             foreach (var b in new[] { _captureBtn, _calibrateBtn, _clearBtn })
                 buttons.AddView(b, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WrapContent, 1f));
             root.AddView(buttons);
@@ -319,9 +438,11 @@ namespace StarLocator.Droid
             root.AddView(Label(
                 "How to use\n" +
                 "1. Go outside on a clear night, let the screen dim adapt, avoid the Moon.\n" +
-                "2. Brace the phone (on a rock, car roof or tripod) with the back camera aimed 45–90° up.\n" +
-                "3. CAPTURE and don't touch it during the exposure. Increase exposure/ISO if few stars are found.\n" +
-                "4. For best accuracy: take 4–6 shots, tilting the phone differently each time " +
+                "2. Tap CAPTURE, then during the countdown (beeps) place the phone screen-down on a rock, car roof or tripod " +
+                "with the back camera aimed 45–90° up.\n" +
+                "3. Don't touch it until the long 'done' tone. With the bracket on, 4 exposures are taken and combined. " +
+                "Increase exposure/ISO if few stars are found.\n" +
+                "4. For best accuracy: take 4–6 captures, tilting the phone differently each time " +
                 "(portrait, landscape, leaning left/right), then CALIBRATE. This measures your phone's accelerometer " +
                 "bias and camera mounting error and is remembered for later single shots.\n" +
                 "Accuracy: typically tens of km uncalibrated, a few km calibrated. Phone clock error of 1 s ≈ 0.4 km.", 12, false));
@@ -337,6 +458,13 @@ namespace StarLocator.Droid
             if (bold) t.SetTypeface(null, TypefaceStyle.Bold);
             t.SetPadding(0, 8, 0, 8);
             return t;
+        }
+
+        private RadioButton MakeRadio(string text)
+        {
+            var r = new RadioButton(this) { Text = text, Id = View.GenerateViewId() };
+            r.SetTextColor(Fg);
+            return r;
         }
 
         private EditText NumberBox(string value)
@@ -358,12 +486,13 @@ namespace StarLocator.Droid
         private void UpdateButtons()
         {
             if (_captureBtn == null) return;
-            _captureBtn.Enabled = !_busy;
-            _calibrateBtn.Enabled = !_busy && _shots.Count >= 3;
+            _captureBtn.Enabled = true;
+            _captureBtn.Text = _busy ? "CANCEL" : "CAPTURE";
+            _calibrateBtn.Enabled = !_busy && _poses >= 3;
             _clearBtn.Enabled = !_busy && _shots.Count > 0;
             _mapBtn.Enabled = _lastFix != null;
             _forgetBtn.Enabled = _calibration != null;
-            _calibrateBtn.Text = $"CALIBRATE ({_shots.Count})";
+            _calibrateBtn.Text = $"CALIBRATE ({_poses})";
         }
 
         private void SetStatus(string s) { if (_status != null) _status.Text = s; }

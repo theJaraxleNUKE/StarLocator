@@ -28,6 +28,7 @@ namespace StarLocator.Tests
             TestReplay(locator);
             TestSingleShots(locator);
             TestMultiShot(locator);
+            TestBracket(locator);
 
             Console.WriteLine(_failures == 0 ? "ALL TESTS PASSED" : $"{_failures} TEST(S) FAILED");
             return _failures == 0 ? 0 : 1;
@@ -191,6 +192,48 @@ namespace StarLocator.Tests
             FrameResult neg = loc.ProcessFrame(luma, 4000, 3000, 4000, cam, g, DateTime.UtcNow);
             Console.WriteLine($"    det {neg.Detections.Count}, matched {neg.Identification?.Matches.Count}, lbl {neg.Identification?.ConsistentLabels} -> " + (neg.Fix == null ? "rejected: " + neg.Message : "FALSE FIX " + neg.Fix));
             Check(neg.Fix == null, "No false fix from a random field");
+        }
+
+        private static void TestBracket(CelestialLocator loc)
+        {
+            Console.WriteLine("Exposure bracket at one pose (1-2-4-8 s ~ limiting mag 3.5/4.0/4.5/5.0) + one bumped frame");
+            double lat = 42.6526, lon = -73.7562;
+            var t0 = new DateTime(2026, 11, 19, 2, 0, 0, DateTimeKind.Utc);
+            var mags = new[] { 3.5, 4.0, 4.5, 5.0, 4.5 };
+            var fixes = new List<PositionFix>();
+            var singles = new List<double>();
+            for (int k = 0; k < mags.Length; k++)
+            {
+                var sc = new Scenario
+                {
+                    LatDeg = lat, LonDeg = lon, Utc = t0.AddSeconds(5 * k), AltitudeDeg = 72, AzimuthDeg = 160, RollDeg = 20,
+                    LimitingMag = mags[k], PositionJitterPx = 6, Seed = 4000 + k
+                };
+                SyntheticFrame f = SkySimulator.Render(loc.Catalog, PhoneCamera(-0.04), sc);
+                GravityMeasurement g = f.Gravity;
+                bool bumped = k == mags.Length - 1;
+                if (bumped) g = new GravityMeasurement { Mean = g.Mean + new Vec3(0.35, -0.25, 0.0), StdDev = 0.3, Samples = g.Samples };
+                FrameResult r = loc.ProcessFrame(f.Luma, f.Width, f.Height, f.Width, PhoneCamera(0.0), g, sc.Utc);
+                if (r.Fix == null) { Console.WriteLine($"    frame {k}: not solved ({r.Message})"); continue; }
+                double e = Astronomy.GreatCircleKm(r.Fix.LatitudeDeg, r.Fix.LongitudeDeg, lat, lon);
+                Console.WriteLine($"    frame {k}{(bumped ? " (bumped)" : "")}: {r.Identification!.Matches.Count} stars, err {e:F1} km, random ±{r.Fix.RandomUncertaintyKm:F1} km");
+                fixes.Add(r.Fix);
+                if (!bumped) singles.Add(e);
+            }
+            PositionFix? c = PositionSolver.CombineFixes(fixes, out string msg);
+            if (c == null) { Check(false, "Bracket combine"); return; }
+            double ec = Astronomy.GreatCircleKm(c.LatitudeDeg, c.LongitudeDeg, lat, lon);
+            singles.Sort();
+            double medianSingle = singles[singles.Count / 2];
+            Console.WriteLine($"    {msg} -> err {ec:F1} km (median good single {medianSingle:F1} km), ±{c.UncertaintyKm:F0} km = random {c.RandomUncertaintyKm:F1} + systematic {c.SystematicUncertaintyKm:F0}");
+            Check(fixes.Count >= 4, $"{fixes.Count}/5 bracket frames solved");
+            Check(c.FramesUsed == fixes.Count - 1, "Bumped frame rejected as outlier");
+            Check(ec <= medianSingle + 0.5, $"Combined error {ec:F1} km <= median single {medianSingle:F1} km");
+            Check(c.SystematicUncertaintyKm >= fixes[0].SystematicUncertaintyKm - 1e-9, "Systematic error is not averaged away");
+
+            PositionFix? one = PositionSolver.CombineFixes(new List<PositionFix> { fixes[0] }, out _);
+            Check(one != null && one.LatitudeDeg == fixes[0].LatitudeDeg, "Single frame passes through unchanged");
+            Check(PositionSolver.CombineFixes(new List<PositionFix>(), out _) == null, "No frames -> no fix");
         }
 
         private static void TestReplay(CelestialLocator loc)
