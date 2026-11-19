@@ -1,0 +1,45 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{C0B3EEF0-64BC-4434-99FE-46AE01D97DDB}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "StarLocator.Core", "src\StarLocator.Core\StarLocator.Core.csproj", "{C9E8077C-718A-42AB-9E65-8323B41700A8}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{DEFA5EC2-442C-44F3-AFB1-C9E6CD893FE7}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "StarLocator.Tests", "tests\StarLocator.Tests\StarLocator.Tests.csproj", "{27D33DBB-BB78-43A0-BD3A-0FD6525A9B0C}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "StarLocator.Android", "src\StarLocator.Android\StarLocator.Android.csproj", "{ABEC7F46-055E-405C-B7E3-6D491121A9F9}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{C9E8077C-718A-42AB-9E65-8323B41700A8}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{C9E8077C-718A-42AB-9E65-8323B41700A8}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{C9E8077C-718A-42AB-9E65-8323B41700A8}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{C9E8077C-718A-42AB-9E65-8323B41700A8}.Release|Any CPU.Build.0 = Release|Any CPU
+		{27D33DBB-BB78-43A0-BD3A-0FD6525A9B0C}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{27D33DBB-BB78-43A0-BD3A-0FD6525A9B0C}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{27D33DBB-BB78-43A0-BD3A-0FD6525A9B0C}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{27D33DBB-BB78-43A0-BD3A-0FD6525A9B0C}.Release|Any CPU.Build.0 = Release|Any CPU
+		{ABEC7F46-055E-405C-B7E3-6D491121A9F9}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{ABEC7F46-055E-405C-B7E3-6D491121A9F9}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{ABEC7F46-055E-405C-B7E3-6D491121A9F9}.Debug|Any CPU.Deploy.0 = Debug|Any CPU
+		{ABEC7F46-055E-405C-B7E3-6D491121A9F9}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{ABEC7F46-055E-405C-B7E3-6D491121A9F9}.Release|Any CPU.Build.0 = Release|Any CPU
+		{ABEC7F46-055E-405C-B7E3-6D491121A9F9}.Release|Any CPU.Deploy.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{C9E8077C-718A-42AB-9E65-8323B41700A8} = {C0B3EEF0-64BC-4434-99FE-46AE01D97DDB}
+		{27D33DBB-BB78-43A0-BD3A-0FD6525A9B0C} = {DEFA5EC2-442C-44F3-AFB1-C9E6CD893FE7}
+		{ABEC7F46-055E-405C-B7E3-6D491121A9F9} = {C0B3EEF0-64BC-4434-99FE-46AE01D97DDB}
+	EndGlobalSection
+EndGlobal

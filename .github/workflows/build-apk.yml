@@ -1,0 +1,128 @@
+name: Build APK
+
+# Every push / PR: run the solver test suite and build the APK (downloadable as a workflow artifact).
+# Pushing a tag like v1.2.3: additionally publish a GitHub Release with the APK attached.
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write   # needed to create releases on tag pushes
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      DOTNET_CLI_TELEMETRY_OPTOUT: 1
+      DOTNET_NOLOGO: 1
+      ANDROID_SIGNING_PASSWORD: ${{ secrets.ANDROID_SIGNING_PASSWORD }}
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v7
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Install .NET Android workload
+        run: dotnet workload install android
+
+      - name: Run solver tests (synthetic night-sky frames)
+        run: dotnet run --project tests/StarLocator.Tests -c Release
+
+      - name: Install Android SDK platform and build tools
+        run: >
+          dotnet build src/StarLocator.Android/StarLocator.Android.csproj
+          -t:InstallAndroidDependencies -f net10.0-android
+          -p:AndroidSdkDirectory="$ANDROID_HOME"
+          -p:AcceptAndroidSDKLicenses=True
+
+      - name: Work out version
+        id: ver
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "display=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "display=0.0.${GITHUB_RUN_NUMBER}-dev" >> "$GITHUB_OUTPUT"
+          fi
+          echo "code=${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare signing key
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ] && [ -n "$ANDROID_SIGNING_PASSWORD" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.keystore"
+            echo "SIGN_ARGS=-p:AndroidKeyStore=true -p:AndroidSigningKeyStore=$RUNNER_TEMP/release.keystore -p:AndroidSigningKeyAlias=starlocator -p:AndroidSigningStorePass=env:ANDROID_SIGNING_PASSWORD -p:AndroidSigningKeyPass=env:ANDROID_SIGNING_PASSWORD" >> "$GITHUB_ENV"
+            echo "Signing with the release key from repository secrets."
+          else
+            echo "SIGN_ARGS=" >> "$GITHUB_ENV"
+            echo "::warning::ANDROID_KEYSTORE_BASE64 / ANDROID_SIGNING_PASSWORD secrets not set: APK is signed with a throwaway debug key. Installed copies cannot be updated in place by later builds."
+          fi
+
+      - name: Build signed APK
+        run: >
+          dotnet publish src/StarLocator.Android/StarLocator.Android.csproj
+          -c Release -f net10.0-android
+          -p:AndroidSdkDirectory="$ANDROID_HOME"
+          -p:ApplicationDisplayVersion=${{ steps.ver.outputs.display }}
+          -p:ApplicationVersion=${{ steps.ver.outputs.code }}
+          -o "$RUNNER_TEMP/publish"
+          $SIGN_ARGS
+
+      - name: Verify APK (signature, package, permissions)
+        id: apk
+        run: |
+          set -euo pipefail
+          SRC=$(ls "$RUNNER_TEMP"/publish/*-Signed.apk | head -1)
+          OUT="StarLocator-${{ steps.ver.outputs.display }}.apk"
+          cp "$SRC" "$OUT"
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          echo "== badging"; "$BT/aapt2" dump badging "$OUT" | grep -E "^(package|sdkVersion|targetSdkVersion|native-code|application-label):"
+          echo "== permissions"; "$BT/aapt2" dump permissions "$OUT" | tee perms.txt
+          echo "== signature"; "$BT/apksigner" verify --print-certs "$OUT"
+          # The app must locate itself without network or location services: fail if such permissions slip in.
+          if grep -E "android.permission.(INTERNET|ACCESS_FINE_LOCATION|ACCESS_COARSE_LOCATION|ACCESS_WIFI_STATE|ACCESS_NETWORK_STATE)" perms.txt; then
+            echo "::error::Unexpected network/location permission in the APK"; exit 1
+          fi
+          sha256sum "$OUT" > "$OUT.sha256"
+          cat "$OUT.sha256"
+          echo "file=$OUT" >> "$GITHUB_OUTPUT"
+
+      - name: Upload APK as workflow artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: StarLocator-${{ steps.ver.outputs.display }}
+          path: |
+            ${{ steps.apk.outputs.file }}
+            ${{ steps.apk.outputs.file }}.sha256
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v3
+        with:
+          name: Star Locator ${{ steps.ver.outputs.display }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            ${{ steps.apk.outputs.file }}
+            ${{ steps.apk.outputs.file }}.sha256
+          body: |
+            **Install:** download `${{ steps.apk.outputs.file }}` on your Android phone (Android 8.0+, 64-bit ARM or x64), open it and allow "Install unknown apps" for your browser/file manager when asked.
+            The SHA-256 checksum is in the `.sha256` file. See the README for how to use the app.
