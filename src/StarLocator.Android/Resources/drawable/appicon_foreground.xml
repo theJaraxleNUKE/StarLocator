@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Adaptive icon foreground: star in a sighting reticle. Everything sits inside the 66 dp safe circle. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+  <!-- faint background stars -->
+  <path android:fillColor="#FFCFE0FF" android:fillAlpha="0.75"
+      android:pathData="M29.1,34a0.9,0.9 0 1,0 1.8,0a0.9,0.9 0 1,0 -1.8,0 M76.9,30a1.1,1.1 0 1,0 2.2,0a1.1,1.1 0 1,0 -2.2,0 M73.2,78a0.8,0.8 0 1,0 1.6,0a0.8,0.8 0 1,0 -1.6,0 M32,74a1,1 0 1,0 2,0a1,1 0 1,0 -2,0 M83.3,56a0.7,0.7 0 1,0 1.4,0a0.7,0.7 0 1,0 -1.4,0 M23.3,56a0.7,0.7 0 1,0 1.4,0a0.7,0.7 0 1,0 -1.4,0" />
+  <!-- reticle ring -->
+  <path android:strokeColor="#FF8FB4FF" android:strokeWidth="2"
+      android:pathData="M30,54a24,24 0 1,0 48,0a24,24 0 1,0 -48,0" />
+  <!-- tick marks -->
+  <path android:strokeColor="#FF8FB4FF" android:strokeWidth="2.4" android:strokeLineCap="round"
+      android:pathData="M54,24L54,32M54,76L54,84M24,54L32,54M76,54L84,54" />
+  <!-- glow behind the star -->
+  <path android:pathData="M41,54a13,13 0 1,0 26,0a13,13 0 1,0 -26,0">
+    <aapt:attr name="android:fillColor">
+      <gradient android:type="radial"
+          android:centerX="54" android:centerY="54" android:gradientRadius="13"
+          android:startColor="#E6FFE7A8" android:endColor="#00FFE7A8" />
+    </aapt:attr>
+  </path>
+  <!-- four-point star -->
+  <path android:fillColor="#FFFFD27A"
+      android:pathData="M54,39L57.2,50.8L69,54L57.2,57.2L54,69L50.8,57.2L39,54L50.8,50.8Z" />
+</vector>

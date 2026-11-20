@@ -103,7 +103,9 @@ jobs:
           OUT="StarLocator-${{ steps.ver.outputs.display }}.apk"
           cp "$SRC" "$OUT"
           BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
-          echo "== badging"; "$BT/aapt2" dump badging "$OUT" | grep -E "^(package|sdkVersion|targetSdkVersion|native-code|application-label):"
+          echo "== badging"; "$BT/aapt2" dump badging "$OUT" > badging.txt
+          grep -E "^(package|sdkVersion|targetSdkVersion|native-code|application-label|application):" badging.txt
+          grep -q "^application:.*icon='" badging.txt || { echo "::error::APK declares no app icon"; exit 1; }
           echo "== permissions"; "$BT/aapt2" dump permissions "$OUT" | tee perms.txt
           echo "== signature"; "$BT/apksigner" verify --print-certs "$OUT"
           # Nothing may ever leave the phone: fail if any network permission slips in.

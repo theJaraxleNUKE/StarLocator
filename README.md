@@ -238,6 +238,7 @@ src/StarLocator.Android/    Android app (net10.0-android): Camera2 manual captur
                             sampling, UI, result rendering, calibration storage, frame export
 tests/StarLocator.Tests/    Sky simulator, unit + end-to-end tests, robustness sweep, frame replay
 hardware/mount/             3D-printable 60° phone mount (OpenSCAD source, STL, preview)
+art/icon/                   App icon source (SVG); the app uses it as an adaptive vector icon
 .github/workflows/          CI: test, build, verify and release the APK
 ```
 
