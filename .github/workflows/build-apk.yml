@@ -106,10 +106,12 @@ jobs:
           echo "== badging"; "$BT/aapt2" dump badging "$OUT" | grep -E "^(package|sdkVersion|targetSdkVersion|native-code|application-label):"
           echo "== permissions"; "$BT/aapt2" dump permissions "$OUT" | tee perms.txt
           echo "== signature"; "$BT/apksigner" verify --print-certs "$OUT"
-          # The app must locate itself without network or location services: fail if such permissions slip in.
-          if grep -E "android.permission.(INTERNET|ACCESS_FINE_LOCATION|ACCESS_COARSE_LOCATION|ACCESS_WIFI_STATE|ACCESS_NETWORK_STATE)" perms.txt; then
-            echo "::error::Unexpected network/location permission in the APK"; exit 1
+          # Nothing may ever leave the phone: fail if any network permission slips in.
+          # (Location is allowed: it is used only by the optional one-time calibration, never for fixes.)
+          if grep -E "android.permission.(INTERNET|ACCESS_NETWORK_STATE|ACCESS_WIFI_STATE|CHANGE_WIFI_STATE|ACCESS_BACKGROUND_LOCATION)" perms.txt; then
+            echo "::error::Unexpected network or background-location permission in the APK"; exit 1
           fi
+          grep -q "android.permission.CAMERA" perms.txt || { echo "::error::CAMERA permission missing"; exit 1; }
           sha256sum "$OUT" > "$OUT.sha256"
           cat "$OUT.sha256"
           echo "file=$OUT" >> "$GITHUB_OUTPUT"
@@ -121,6 +123,7 @@ jobs:
           path: |
             ${{ steps.apk.outputs.file }}
             ${{ steps.apk.outputs.file }}.sha256
+            hardware/mount/starlocator_mount_60deg.stl
 
       - name: Publish GitHub Release
         if: steps.ver.outputs.release == 'true'
@@ -135,6 +138,8 @@ jobs:
           files: |
             ${{ steps.apk.outputs.file }}
             ${{ steps.apk.outputs.file }}.sha256
+            hardware/mount/starlocator_mount_60deg.stl
           body: |
             **Install:** download `${{ steps.apk.outputs.file }}` on your Android phone (Android 8.0+, 64-bit ARM or x64), open it and allow "Install unknown apps" for your browser/file manager when asked.
-            The SHA-256 checksum is in the `.sha256` file. See the README for how to use the app.
+            The SHA-256 checksum is in the `.sha256` file. `starlocator_mount_60deg.stl` is the 3D-printable 60° phone mount.
+            See the README for how to use the app and calibrate it once.

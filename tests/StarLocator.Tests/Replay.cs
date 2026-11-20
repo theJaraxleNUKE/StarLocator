@@ -37,6 +37,8 @@ namespace StarLocator.Tests
             Console.WriteLine($"{w}x{h}, {r.Detections.Count} detections, camera from {kv.GetValueOrDefault("cameraModelSource", "?")}");
             Console.WriteLine(r.Message);
             if (r.Identification != null)
+                Console.WriteLine($"Focal: nominal fx {cam.Fx:F1} px, solved scale x{r.Identification.FocalScale:F4} (fx {r.Identification.Camera.Fx:F1} px), K1 {r.Identification.Camera.K1:F4}");
+            if (r.Identification != null)
                 foreach (var m in r.Identification.Matches)
                     Console.WriteLine($"  {m.Star.DisplayName,-16} mag {m.Star.Mag,5:F2}  residual {m.ResidualDeg:F3}°");
             if (r.Fix != null) Console.WriteLine("FIX: " + r.Fix + "  " + Astronomy.ToDms(r.Fix.LatitudeDeg, true) + " " + Astronomy.ToDms(r.Fix.LongitudeDeg, false));

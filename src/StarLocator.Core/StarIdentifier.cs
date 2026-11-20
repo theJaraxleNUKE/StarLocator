@@ -28,6 +28,14 @@ namespace StarLocator.Core
         public Action<IReadOnlyList<(int Det, CatalogStar Star, double Votes)>>? LabelObserver { get; set; }
         /// <summary>Focal-length scale factors tried if the nominal camera model fails.</summary>
         public double[] FocalScaleTrials { get; set; } = { 1.0, 0.98, 1.02, 0.96, 1.04, 0.94, 1.06, 0.92, 1.08, 0.90, 1.10 };
+        /// <summary>
+        /// If no trial above succeeds, also try focal scales from WideFocalMin to WideFocalMax in 2% steps,
+        /// nearest to 1.0 first. Needed for phones whose reported lens calibration is far off
+        /// (one real phone reported a focal length 26% too short).
+        /// </summary>
+        public bool WideFocalSearch { get; set; } = true;
+        public double WideFocalMin { get; set; } = 0.6;
+        public double WideFocalMax { get; set; } = 1.6;
     }
 
     public sealed class StarMatch
@@ -87,17 +95,39 @@ namespace StarLocator.Core
             IdentifierOptions o = options ?? new IdentifierOptions();
             IdentificationResult? best = null;
             int totalHyp = 0;
-            foreach (double fs in o.FocalScaleTrials)
+            foreach (double fs in FocalTrials(o))
             {
                 CameraModel cam = camera.WithAdjustments(fs, camera.K1);
                 IdentificationResult r = IdentifyWithCamera(detections, cam, upDevice, o, fs);
                 totalHyp += r.Hypotheses;
                 if (best == null || Better(r, best)) best = r;
                 if (best.Success && best.Matches.Count >= 2 * o.MinMatches && best.ConsistentLabels >= 2 * o.MinConsistentLabels) break;
+                // The wide search is only for when the normal trials found nothing at all.
+                if (best.Success && Array.IndexOf(o.FocalScaleTrials, fs) < 0) break;
             }
             best ??= new IdentificationResult { Success = false, Message = "No detections", Camera = camera };
             best.ElapsedMs = sw.ElapsedMilliseconds;
             return best;
+        }
+
+        /// <summary>The fine trials first, then (optionally) a 2%-step sweep outward from 1.0 over the wide range.</summary>
+        private static IEnumerable<double> FocalTrials(IdentifierOptions o)
+        {
+            var tried = new List<double>();
+            foreach (double fs in o.FocalScaleTrials) { tried.Add(fs); yield return fs; }
+            if (!o.WideFocalSearch) yield break;
+            var wide = new List<double>();
+            for (double fs = 1.0; fs <= o.WideFocalMax + 1e-9; fs *= 1.02) wide.Add(fs);
+            for (double fs = 1.0 / 1.02; fs >= o.WideFocalMin - 1e-9; fs /= 1.02) wide.Add(fs);
+            wide.Sort((a, b) => Math.Abs(Math.Log(a)).CompareTo(Math.Abs(Math.Log(b))));
+            foreach (double fs in wide)
+            {
+                bool near = false;
+                foreach (double t in tried) if (Math.Abs(Math.Log(fs / t)) < 0.009) { near = true; break; }
+                if (near) continue;
+                tried.Add(fs);
+                yield return fs;
+            }
         }
 
         private static bool Better(IdentificationResult a, IdentificationResult b)

@@ -40,10 +40,33 @@ namespace StarLocator.Core
         public int Shots { get; init; }
         public DateTime CreatedUtc { get; init; }
 
-        public override string ToString() =>
-            string.Format(System.Globalization.CultureInfo.InvariantCulture,
-                "bias {0:F3} m/s², misalignment {1:F2}° ({2} shots)",
-                AccelBias.Length, CameraMisalignment.Length * Astronomy.RadToDeg, Shots);
+        /// <summary>
+        /// True when the correction is only exact for one phone pose (a one-time calibration in a fixed
+        /// mount). AccelBias then holds the combined "tilt error" of that pose and CameraMisalignment is zero.
+        /// </summary>
+        public bool PoseSpecific { get; init; }
+        /// <summary>Unit "up" vector in the device frame at calibration (for pose-change warnings).</summary>
+        public Vec3 PoseUp { get; init; }
+        /// <summary>How the calibration was made, e.g. "known location (GPS)".</summary>
+        public string Method { get; init; } = "multi-pose";
+        /// <summary>Phone (battery) temperature at calibration in °C, or NaN if unknown.</summary>
+        public double TemperatureC { get; init; } = double.NaN;
+        /// <summary>Uncalibrated error of the calibration capture itself, in km (known-location method only).</summary>
+        public double ErrorBeforeKm { get; init; } = double.NaN;
+
+        /// <summary>Angle (degrees) between the current gravity direction and the calibration pose.</summary>
+        public double PoseDifferenceDeg(Vec3 accel) =>
+            PoseUp.Length > 0.5 ? Vec3.Angle(PoseUp, accel) * Astronomy.RadToDeg : 0.0;
+
+        public override string ToString()
+        {
+            var ci = System.Globalization.CultureInfo.InvariantCulture;
+            if (PoseSpecific)
+                return string.Format(ci, "{0}, pose-specific tilt correction {1:F2}° ({2} frames)",
+                    Method, Math.Atan2(AccelBias.Length, PositionSolver.StandardGravity) * Astronomy.RadToDeg, Shots);
+            return string.Format(ci, "{0}, bias {1:F3} m/s², misalignment {2:F2}° ({3} frames)",
+                Method, AccelBias.Length, CameraMisalignment.Length * Astronomy.RadToDeg, Shots);
+        }
     }
 
     public sealed class PositionFix
@@ -244,9 +267,12 @@ namespace StarLocator.Core
             double systematicM = AssumedCalibratedTiltErrorDeg * Astronomy.DegToRad;
             double sigma = Math.Sqrt(randomM * randomM + systematicM * systematicM);
 
+            Vec3 upAvg = Vec3.Zero;
+            foreach (Shot s in shots) upAvg += s.Gravity.Mean.Normalized();
             var cal = new SensorCalibration
             {
-                AccelBias = bias, CameraMisalignment = wf, Shots = shots.Count, CreatedUtc = DateTime.UtcNow
+                AccelBias = bias, CameraMisalignment = wf, Shots = shots.Count, CreatedUtc = DateTime.UtcNow,
+                PoseSpecific = false, PoseUp = upAvg.Normalized(), Method = "multi-pose (no reference)"
             };
             double biasDeg = Math.Atan2(bias.Length, g) * Astronomy.RadToDeg;
             message = $"Solved {shots.Count} shots. Accelerometer bias {bias.Length:F3} m/s² (≈{biasDeg:F2}°)" +
@@ -265,6 +291,122 @@ namespace StarLocator.Core
                 ShotCount = shots.Count,
                 Calibration = cal,
                 Notes = message
+            };
+        }
+
+        /// <summary>
+        /// One-time calibration at a known position (from GPS or typed coordinates).
+        ///
+        /// For each frame the true zenith is known, so the error in the phone's "up" reading is measured
+        /// directly: r_k = a_k - g*u_k with u_k = M_k * zenith_true.
+        ///  * Frames from one pose (e.g. a fixed mount): the mean r is stored as a pose-specific tilt
+        ///    correction. Bias and camera misalignment cannot be told apart from one pose, but for that
+        ///    pose their sum is exactly what has to be removed.
+        ///  * Frames from clearly different tilts: r_k = b + [g u_k x] w is solved for the accelerometer
+        ///    bias b and camera/IMU misalignment w, which then hold for any pose.
+        /// </summary>
+        public static SensorCalibration? CalibrateAtKnownLocation(IReadOnlyList<Shot> shots, double latDeg, double lonDeg,
+            string method, double temperatureC, out string message)
+        {
+            message = "";
+            if (shots.Count == 0) { message = "No solved frames to calibrate with."; return null; }
+            Vec3 zTrue = Vec3.FromSpherical(lonDeg * Astronomy.DegToRad, latDeg * Astronomy.DegToRad);
+
+            // How wrong was the capture before calibration?
+            var before = new List<PositionFix>();
+            foreach (Shot s in shots) before.Add(SolveSingle(s));
+            PositionFix? beforeFix = CombineFixes(before, out _);
+            double errBefore = beforeFix == null ? double.NaN
+                : Astronomy.GreatCircleKm(beforeFix.LatitudeDeg, beforeFix.LongitudeDeg, latDeg, lonDeg);
+
+            double g = 0;
+            Vec3 upSum = Vec3.Zero;
+            foreach (Shot s in shots) { g += s.Gravity.Mean.Length; upSum += s.Gravity.Mean.Normalized(); }
+            g /= shots.Count;
+            Vec3 poseUp = upSum.Normalized();
+            double spread = 0;
+            foreach (Shot s in shots) spread = Math.Max(spread, Vec3.Angle(s.Gravity.Mean, poseUp) * Astronomy.RadToDeg);
+
+            if (shots.Count >= 2 && spread >= 15.0)
+            {
+                // Full model: a_k = g*u_k + [u_k x] w' + b with w' = g*w.
+                // 7 linear unknowns (g, b, w'); g must be free or the bias component along "up" is lost.
+                const int np = 7;
+                var n = new double[np, np];
+                var rhs = new double[np];
+                foreach (Shot s in shots)
+                {
+                    Vec3 u = s.EarthFixedToDevice * zTrue;
+                    Vec3 a = s.Gravity.Mean;
+                    var ux = new Mat3(0, -u.Z, u.Y, u.Z, 0, -u.X, -u.Y, u.X, 0);
+                    double[] res = { a.X, a.Y, a.Z };
+                    double[] uu = { u.X, u.Y, u.Z };
+                    Vec3[] rows = { ux.Row0, ux.Row1, ux.Row2 };
+                    for (int row = 0; row < 3; row++)
+                    {
+                        var j = new double[np];
+                        j[0] = uu[row];
+                        j[1 + row] = 1.0;
+                        j[4] = rows[row].X; j[5] = rows[row].Y; j[6] = rows[row].Z;
+                        for (int i = 0; i < np; i++)
+                        {
+                            rhs[i] += j[i] * res[row];
+                            for (int k = 0; k < np; k++) n[i, k] += j[i] * j[k];
+                        }
+                    }
+                }
+                var scaled = new double[np, np];
+                for (int i = 0; i < np; i++)
+                    for (int k = 0; k < np; k++)
+                        scaled[i, k] = n[i, k] / Math.Sqrt(n[i, i] * n[k, k]);
+                (double[] eig, _) = LinAlg.SymmetricEigen(scaled);
+                double minEig = double.MaxValue;
+                foreach (double e in eig) minEig = Math.Min(minEig, e);
+                double[]? x = minEig >= 0.01 ? LinAlg.Solve(n, rhs) : null;
+                if (x != null && x[0] > 5 && x[0] < 15)
+                {
+                    double gFit = x[0];
+                    var cal = new SensorCalibration
+                    {
+                        AccelBias = new Vec3(x[1], x[2], x[3]),
+                        CameraMisalignment = new Vec3(x[4], x[5], x[6]) / gFit,
+                        Shots = shots.Count,
+                        CreatedUtc = DateTime.UtcNow,
+                        PoseSpecific = false,
+                        PoseUp = poseUp,
+                        Method = method + ", multi-pose",
+                        TemperatureC = temperatureC,
+                        ErrorBeforeKm = errBefore
+                    };
+                    message = $"Calibrated from {shots.Count} frames at {spread:F0}° of tilt spread: works in any pose. " +
+                              $"Uncalibrated this capture was {errBefore:F1} km off.";
+                    return cal;
+                }
+            }
+
+            // Pose-specific: average tilt error of this pose.
+            Vec3 rSum = Vec3.Zero;
+            foreach (Shot s in shots)
+            {
+                Vec3 a = s.Gravity.Mean;
+                Vec3 u = s.EarthFixedToDevice * zTrue;
+                rSum += a - u * a.Length;
+            }
+            Vec3 b = rSum / shots.Count;
+            double tiltDeg = Math.Atan2(b.Length, g) * Astronomy.RadToDeg;
+            message = $"One-time calibration for this pose: tilt error {tiltDeg:F2}° removed. " +
+                      $"Uncalibrated this capture was {errBefore:F1} km off. Keep the phone in the same mount/pose.";
+            return new SensorCalibration
+            {
+                AccelBias = b,
+                CameraMisalignment = Vec3.Zero,
+                Shots = shots.Count,
+                CreatedUtc = DateTime.UtcNow,
+                PoseSpecific = true,
+                PoseUp = poseUp,
+                Method = method,
+                TemperatureC = temperatureC,
+                ErrorBeforeKm = errBefore
             };
         }
 

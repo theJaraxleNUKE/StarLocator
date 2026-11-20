@@ -20,6 +20,7 @@ namespace StarLocator.Tests
             TestAstronomy();
             TestWahba();
             TestCamera();
+            TestCoordinateParser();
 
             var sw = Stopwatch.StartNew();
             var locator = new CelestialLocator();
@@ -29,6 +30,8 @@ namespace StarLocator.Tests
             TestSingleShots(locator);
             TestMultiShot(locator);
             TestBracket(locator);
+            TestWideFocal(locator);
+            TestKnownLocationCalibration(locator);
 
             Console.WriteLine(_failures == 0 ? "ALL TESTS PASSED" : $"{_failures} TEST(S) FAILED");
             return _failures == 0 ? 0 : 1;
@@ -234,6 +237,134 @@ namespace StarLocator.Tests
             PositionFix? one = PositionSolver.CombineFixes(new List<PositionFix> { fixes[0] }, out _);
             Check(one != null && one.LatitudeDeg == fixes[0].LatitudeDeg, "Single frame passes through unchanged");
             Check(PositionSolver.CombineFixes(new List<PositionFix>(), out _) == null, "No frames -> no fix");
+        }
+
+        private static void TestCoordinateParser()
+        {
+            Console.WriteLine("Coordinate parser");
+            double eLat = 40 + 41 / 60.0 + 21.3 / 3600, eLon = -(74 + 2 / 60.0 + 40.2 / 3600);   // Statue of Liberty
+            var ok = new[]
+            {
+                "40°41'21.3\"N 74°02'40.2\"W", "40°41′21.3″N, 74°02′40.2″W", "40 41 21.3 N, 74 02 40.2 W",
+                "40.68925, -74.0445", "40.68925 -74.0445", "40.68925N 74.0445W", "40°41.355'N 74°02.670'W"
+            };
+            foreach (string t in ok)
+            {
+                bool good = CoordinateParser.TryParse(t, out double la, out double lo, out string err);
+                Check(good && Math.Abs(la - eLat) < 2e-5 && Math.Abs(lo - eLon) < 2e-5, $"\"{t}\" -> {la:F6}, {lo:F6} {err}");
+            }
+            foreach (string t in new[] { "", "42.7", "abc", "95, 10", "10, 190", "74°02'W 40°41'N", "40°75'N 74°W" })
+                Check(!CoordinateParser.TryParse(t, out _, out _, out string err), $"rejects \"{t}\" ({err})");
+        }
+
+        private static void TestWideFocal(CelestialLocator loc)
+        {
+            Console.WriteLine("Phone reports a focal length 26% too short (seen on a real phone)");
+            var sc = new Scenario { LatDeg = 42.65, LonDeg = -73.76, Utc = new DateTime(2026, 11, 20, 1, 20, 0, DateTimeKind.Utc),
+                                    AltitudeDeg = 55, AzimuthDeg = 22, RollDeg = 0, LimitingMag = 4.6, PositionJitterPx = 3, Seed = 61 };
+            CameraModel truth = PhoneCamera(0); truth.Fx *= 1.259; truth.Fy *= 1.259;
+            (double err, FrameResult r) = RunOne(loc, sc, truth, PhoneCamera(0));
+            Check(r.Fix != null, "Solved despite the wrong reported focal length");
+            if (r.Identification != null)
+                Check(Math.Abs(r.Identification.FocalScale - 1.259) < 0.01, $"Recovered focal scale {r.Identification.FocalScale:F4} (true 1.259)");
+
+            var opts = new LocatorOptions();
+            int falseFix = 0;
+            var sw = Stopwatch.StartNew();
+            for (int t = 0; t < 10; t++)
+            {
+                var rng = new Random(100 + t);
+                var luma = new byte[4000 * 3000];
+                for (int k = 0; k < luma.Length; k++) luma[k] = (byte)(25 + rng.Next(-4, 5));
+                int blobs = 20 + rng.Next(60);
+                for (int k = 0; k < blobs; k++)
+                {
+                    int u = 50 + rng.Next(3900), v = 50 + rng.Next(2900);
+                    for (int dy = -2; dy <= 2; dy++) for (int dx = -2; dx <= 2; dx++) luma[(v + dy) * 4000 + u + dx] = (byte)(80 + rng.Next(150));
+                }
+                var g = new GravityMeasurement { Mean = new Vec3(0, 0, -9.8), StdDev = 0.02, Samples = 100 };
+                if (loc.ProcessFrame(luma, 4000, 3000, 4000, PhoneCamera(0), g, DateTime.UtcNow).Fix != null) falseFix++;
+            }
+            Check(falseFix == 0, $"Random fields with the wide focal search: {falseFix}/10 false fixes ({sw.ElapsedMilliseconds / 10} ms per frame)");
+        }
+
+        private static void TestKnownLocationCalibration(CelestialLocator loc)
+        {
+            Console.WriteLine("One-time calibration at a known location, phone in a fixed 60° mount");
+            Vec3 bias = new Vec3(0.11, -0.09, 0.05);
+            Vec3 mis = new Vec3(0.3, -0.6, 0.2).Normalized() * (0.4 * Astronomy.DegToRad);
+            CameraModel TrueCam() { var c = PhoneCamera(-0.04); c.Cx += 20; c.Cy -= 12; return c; }
+            double calLat = 42.6526, calLon = -73.7562;
+            var t0 = new DateTime(2026, 11, 20, 1, 0, 0, DateTimeKind.Utc);
+
+            Shot? MakeShot(double lat, double lon, DateTime utc, double alt, double az, double roll, double mag, int seed, SensorCalibration? cal, out double err)
+            {
+                var sc = new Scenario { LatDeg = lat, LonDeg = lon, Utc = utc, AltitudeDeg = alt, AzimuthDeg = az, RollDeg = roll,
+                                        LimitingMag = mag, AccelBias = bias, CameraMisalignment = mis, PositionJitterPx = 4, Seed = seed };
+                SyntheticFrame f = SkySimulator.Render(loc.Catalog, TrueCam(), sc);
+                FrameResult r = loc.ProcessFrame(f.Luma, f.Width, f.Height, f.Width, PhoneCamera(0), f.Gravity, utc, cal);
+                err = r.Fix == null ? double.NaN : Astronomy.GreatCircleKm(r.Fix.LatitudeDeg, r.Fix.LongitudeDeg, lat, lon);
+                return r.Shot;
+            }
+
+            // Calibration capture: one bracket (3 frames) in the mount, at the known spot.
+            var calShots = new List<Shot>();
+            double[] mags = { 4.0, 4.5, 5.0 };
+            for (int k = 0; k < mags.Length; k++)
+            {
+                Shot? s = MakeShot(calLat, calLon, t0.AddSeconds(5 * k), 60, 30, 0, mags[k], 7000 + k, null, out _);
+                if (s != null) calShots.Add(s);
+            }
+            SensorCalibration? cal = PositionSolver.CalibrateAtKnownLocation(calShots, calLat, calLon, "known location (test)", 8.0, out string msg);
+            Console.WriteLine("    " + msg);
+            if (cal == null) { Check(false, "Known-location calibration"); return; }
+            Check(cal.PoseSpecific, "Single-pose capture gives a pose-specific calibration");
+
+            // Later: other places, nights and compass directions, same mount pose.
+            var tests = new (double Lat, double Lon, double Hours, double Az)[]
+                { (42.6526, -73.7562, 1, 200), (44.30, -75.50, 30, 120), (40.71, -74.00, 75, 300), (43.10, -71.20, 170, 45) };
+            double worstCal = 0, worstUncal = 0;
+            int i = 0;
+            foreach (var t in tests)
+            {
+                MakeShot(t.Lat, t.Lon, t0.AddHours(t.Hours), 60, t.Az, 0, 4.5, 7100 + i, cal, out double eCal);
+                MakeShot(t.Lat, t.Lon, t0.AddHours(t.Hours), 60, t.Az, 0, 4.5, 7100 + i, null, out double eUn);
+                Console.WriteLine($"    {t.Lat:F2},{t.Lon:F2} az {t.Az,3}°: calibrated {eCal:F1} km, uncalibrated {eUn:F1} km");
+                worstCal = Math.Max(worstCal, double.IsNaN(eCal) ? 1e9 : eCal);
+                worstUncal = Math.Max(worstUncal, eUn);
+                i++;
+            }
+            Check(worstCal < 5, $"Same pose anywhere: worst calibrated error {worstCal:F1} km < 5 km (uncalibrated up to {worstUncal:F1} km)");
+
+            MakeShot(41.5, -74.5, t0.AddHours(50), 55, 90, 0, 4.5, 7200, cal, out double e5);
+            Console.WriteLine($"    pose 5° off the calibration pose: {e5:F1} km (warning would show: {cal.PoseDifferenceDeg(new Vec3(0, Math.Sin(35 * Math.PI / 180), -Math.Cos(35 * Math.PI / 180))) > 3})");
+            Check(e5 < 10, $"5° pose change still under 10 km ({e5:F1} km)");
+
+            Console.WriteLine("  Known location, captures at three different tilts (full model)");
+            var multi = new List<Shot>();
+            var poses = new (double Alt, double Az, double Roll)[] { (85, 0, 0), (55, 90, 90), (55, 210, 300), (60, 330, 180) };
+            for (int k = 0; k < poses.Length; k++)
+            {
+                Shot? s = MakeShot(calLat, calLon, t0.AddSeconds(40 * k), poses[k].Alt, poses[k].Az, poses[k].Roll, 4.5, 7300 + k, null, out _);
+                if (s != null) multi.Add(s);
+            }
+            SensorCalibration? full = PositionSolver.CalibrateAtKnownLocation(multi, calLat, calLon, "known location (test)", double.NaN, out string msg2);
+            Console.WriteLine("    " + msg2);
+            Check(full != null && !full.PoseSpecific, "Different tilts give a pose-independent calibration");
+            if (full == null) return;
+            Console.WriteLine($"    estimated bias {full.AccelBias} (true {bias}), misalignment {full.CameraMisalignment} = {full.CameraMisalignment.Length * Astronomy.RadToDeg:F2}° (true {mis} + principal-point offset)");
+            PositionFix? sm = PositionSolver.SolveMulti(multi, out _);
+            if (sm?.Calibration != null) Console.WriteLine($"    for comparison SolveMulti (unknown position): bias {sm.Calibration.AccelBias}, misalignment {sm.Calibration.CameraMisalignment}");
+            double worst = 0;
+            var any = new (double Alt, double Az, double Roll)[] { (70, 140, 45), (50, 270, 250), (80, 20, 120) };
+            for (int k = 0; k < any.Length; k++)
+            {
+                MakeShot(41.0, -76.0, t0.AddHours(20 + k), any[k].Alt, any[k].Az, any[k].Roll, 4.5, 7400 + k, full, out double e);
+                MakeShot(41.0, -76.0, t0.AddHours(20 + k), any[k].Alt, any[k].Az, any[k].Roll, 4.5, 7400 + k, sm?.Calibration, out double eSm);
+                Console.WriteLine($"    pose alt {any[k].Alt} roll {any[k].Roll}: known-location full cal {e:F1} km, SolveMulti cal {eSm:F1} km");
+                worst = Math.Max(worst, double.IsNaN(e) ? 1e9 : e);
+            }
+            Check(worst < 8, $"Any pose after full calibration: worst {worst:F1} km < 8 km");
         }
 
         private static void TestReplay(CelestialLocator loc)
