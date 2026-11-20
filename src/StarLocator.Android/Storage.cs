@@ -95,6 +95,28 @@ namespace StarLocator.Droid
             e.Apply();
         }
 
+        // ---- Simple settings ----------------------------------------------------------------------
+
+        public static string GetSetting(Context ctx, string key, string fallback) =>
+            P(ctx).GetString("set_" + key, null) ?? fallback;
+
+        public static void SetSetting(Context ctx, string key, string value)
+        {
+            ISharedPreferencesEditor e = P(ctx).Edit()!;
+            e.PutString("set_" + key, value);
+            e.Apply();
+        }
+
+        /// <summary>Number of files and total megabytes in a folder.</summary>
+        public static (int Files, double Megabytes) FolderSize(string dir)
+        {
+            if (!Directory.Exists(dir)) return (0, 0);
+            long bytes = 0;
+            string[] files = Directory.GetFiles(dir);
+            foreach (string f in files) bytes += new FileInfo(f).Length;
+            return (files.Length, bytes / 1048576.0);
+        }
+
         // ---- Learned focal-length correction ------------------------------------------------------
 
         /// <summary>Factor to apply to the phone's reported focal length (1.0 until a capture solves).</summary>

@@ -32,13 +32,14 @@ namespace StarLocator.Droid
     }
 
     /// <summary>
-    /// Camera2 controller: live preview for aiming plus manual long-exposure YUV captures with
-    /// focus at infinity. All camera callbacks run on a private handler thread.
+    /// Camera2 controller for manual long-exposure YUV captures with focus at infinity. There is no
+    /// preview (the phone lies screen-down in its mount); the session has a single output, the
+    /// image reader. All camera callbacks run on a private handler thread.
     /// </summary>
     public sealed class CameraCapture : IDisposable
     {
         // Camera2 constant values.
-        private const int ControlModeOff = 0, ControlModeAuto = 1;
+        private const int ControlModeOff = 0;
         private const int AeModeOff = 0, AfModeOff = 0, NoiseReductionFast = 1;
 
         private readonly Context _context;
@@ -48,8 +49,6 @@ namespace StarLocator.Droid
         private CameraDevice? _device;
         private CameraCaptureSession? _session;
         private ImageReader? _reader;
-        private Surface? _previewSurface;
-        private SurfaceTexture? _texture;
         private TaskCompletionSource<CapturedFrame>? _pending;
         private long _pendingExposureNs;
         private int _pendingIso;
@@ -70,10 +69,9 @@ namespace StarLocator.Droid
             _manager = context.GetSystemService(Context.CameraService)!.JavaCast<CameraManager>()!;
         }
 
-        public void Open(SurfaceTexture previewTexture)
+        public void Open()
         {
             Close();
-            _texture = previewTexture;
             _thread = new HandlerThread("StarLocatorCamera");
             _thread.Start();
             _handler = new Handler(_thread.Looper!);
@@ -84,13 +82,9 @@ namespace StarLocator.Droid
 
             StreamConfigurationMap map = chars.Get(CameraCharacteristics.ScalerStreamConfigurationMap)!.JavaCast<StreamConfigurationMap>()!;
             Android.Util.Size[] yuv = map.GetOutputSizes((int)ImageFormatType.Yuv420888) ?? Array.Empty<Android.Util.Size>();
-            Android.Util.Size[] prev = map.GetOutputSizes(Java.Lang.Class.FromType(typeof(SurfaceTexture))) ?? Array.Empty<Android.Util.Size>();
             if (yuv.Length == 0) throw new InvalidOperationException("Camera has no YUV output.");
 
             CaptureSize = ChooseCaptureSize(yuv, 16_500_000);
-            Android.Util.Size preview = ChoosePreviewSize(prev, CaptureSize);
-            _texture.SetDefaultBufferSize(preview.Width, preview.Height);
-            _previewSurface = new Surface(_texture);
             CreateReader(CaptureSize);
 
             _manager.OpenCamera(CameraId, new DeviceCallback(this), _handler);
@@ -132,19 +126,6 @@ namespace StarLocator.Droid
             return best;
         }
 
-        private static Android.Util.Size ChoosePreviewSize(Android.Util.Size[] sizes, Android.Util.Size capture)
-        {
-            double aspect = (double)capture.Width / capture.Height;
-            Android.Util.Size? best = null;
-            foreach (var s in sizes)
-            {
-                if (s.Width > 1920 || s.Height > 1440) continue;
-                if (Math.Abs((double)s.Width / s.Height - aspect) > 0.02) continue;
-                if (best == null || s.Width * s.Height > best.Width * best.Height) best = s;
-            }
-            return best ?? (sizes.Length > 0 ? sizes[0] : new Android.Util.Size(1280, 720));
-        }
-
         private void OnOpened(CameraDevice device)
         {
             _device = device;
@@ -153,8 +134,8 @@ namespace StarLocator.Droid
 
         private void CreateSession()
         {
-            if (_device == null || _reader?.Surface == null || _previewSurface == null) return;
-            var outputs = new List<Surface> { _previewSurface, _reader.Surface };
+            if (_device == null || _reader?.Surface == null) return;
+            var outputs = new List<Surface> { _reader.Surface };
 #pragma warning disable CS0618, CA1422 // CreateCaptureSession(List, ...) is deprecated in API 30 but works on all levels.
             _device.CreateCaptureSession(outputs, new SessionCallback(this), _handler);
 #pragma warning restore CS0618, CA1422
@@ -163,29 +144,18 @@ namespace StarLocator.Droid
         private void OnConfigured(CameraCaptureSession session)
         {
             _session = session;
-            try
-            {
-                CaptureRequest.Builder b = _device!.CreateCaptureRequest(CameraTemplate.Preview);
-                b.AddTarget(_previewSurface!);
-                Put(b, CaptureRequest.ControlMode, Java.Lang.Integer.ValueOf(ControlModeAuto));
-                session.SetRepeatingRequest(b.Build(), null, _handler);
-                StatusChanged?.Invoke($"Camera ready ({CaptureSize?.Width}x{CaptureSize?.Height}).");
-            }
-            catch (Exception ex)
-            {
-                StatusChanged?.Invoke("Preview failed: " + ex.Message);
-            }
+            StatusChanged?.Invoke($"Camera ready ({CaptureSize?.Width}x{CaptureSize?.Height}).");
         }
 
         private void OnConfigureFailed()
         {
-            // Some LIMITED devices cannot stream preview + full-size YUV together: retry smaller.
+            // Some devices refuse the largest YUV size: retry at 1920x1080.
             if (!_usedFallbackSize && _device != null)
             {
                 _usedFallbackSize = true;
                 CaptureSize = new Android.Util.Size(1920, 1080);
                 CreateReader(CaptureSize);
-                StatusChanged?.Invoke("Full-resolution capture not supported with preview; using 1920x1080.");
+                StatusChanged?.Invoke("Full-resolution capture not supported; using 1920x1080.");
                 CreateSession();
                 return;
             }
@@ -252,7 +222,7 @@ namespace StarLocator.Droid
             try
             {
                 TaskCompletionSource<CapturedFrame>? tcs = _pending;
-                if (tcs == null || Info == null) return; // preview never targets the reader; ignore strays
+                if (tcs == null || Info == null) return; // no capture pending: ignore stray images
                 long arrivalRt = SystemClock.ElapsedRealtimeNanos();
                 DateTime arrivalUtc = DateTime.UtcNow;
 
@@ -313,8 +283,6 @@ namespace StarLocator.Droid
             _device = null;
             try { _reader?.Close(); } catch (Exception) { }
             _reader = null;
-            _previewSurface?.Release();
-            _previewSurface = null;
             _pending?.TrySetCanceled();
             _pending = null;
             _usedFallbackSize = false;

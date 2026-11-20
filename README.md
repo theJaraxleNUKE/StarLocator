@@ -44,31 +44,40 @@ Each release also has a `.sha256` file for checking the download.
 
 ## Using the app
 
-1. **Go outside on a clear night.** Avoid the Moon and bright lights. The interface is dim red so it doesn't spoil your night vision.
-2. Set the **countdown** (Off / 5 s / 10 s, default 10 s), then tap **CAPTURE**. While it beeps once a second, put the phone **screen-down** in the [60° mount](#3d-printed-60-mount), or on a rock or car roof, so the back camera points **45–90° up** at clear sky. A higher "go" tone marks the start; after it, don't touch the phone.
-3. With **Exposure bracket** on (the default), the app takes 4 frames at ¼×, ½×, 1× and 2× the set exposure. With the defaults of **4 s** at **ISO 1600** that is 1, 2, 4 and 8 s, clamped to what the camera supports. Each frame is solved on its own. Frames that fail are skipped, outliers (for example a frame where the phone was bumped) are rejected, and the rest are combined into one fix. A long tone means capturing is done and you can pick the phone up. CAPTURE turns into **CANCEL** while a capture is running.
-4. Read the result:
-   - latitude/longitude in degrees-minutes-seconds and decimal degrees;
-   - an estimated 1-σ error in km;
-   - a per-frame report (stars detected and identified, motion warnings);
-   - the frame with the most identified stars, with **identified stars circled in green and named**. Detections it couldn't match are circled in red.
-5. **OPEN IN MAP** passes the fix to any installed map app as a `geo:` link. Offline map apps work.
-6. **EXPORT FRAMES (ZIP)** saves the last capture's frames, camera/accelerometer data and result summary as one zip, wherever you choose (Downloads, cloud drive, …). The zip protects the binary frames: sending raw `.pgm` files through some apps corrupts them. Tick **Save frames for PC replay** to also keep every frame permanently under `Android/data/io.github.thejaraxlenuke.starlocator/files/frames/`.
+The main screen has one big round button, the result, and a calibration badge. Everything else is under **Advanced**. There is no camera preview: in the mount the screen faces down, so the app signals with beeps instead.
+
+1. **Go outside on a clear night.** Avoid the Moon and bright lights.
+2. Tap **Locate**. During the countdown (10 s by default) the app beeps once a second. Put the phone **screen-down** in the [60° mount](#3d-printed-60-mount), or on a rock or car roof, so the back camera points **45–90° up** at clear sky.
+3. A higher tone means capturing has started: don't touch the phone. A long tone means it's done and you can pick the phone up. The ring shows progress (countdown, frame 1/4…, identifying stars). Tap it to cancel.
+4. The card shows the fix in degrees-minutes-seconds and decimal degrees, an estimated 1-σ error in km, and how many frames were used. **Open map** passes the fix to any installed map app as a `geo:` link (offline map apps work). **Copy** copies the decimal coordinates. Warnings show under the fix, e.g. "not calibrated" or "phone was 4° off the calibration pose".
+
+By default the app takes 4 frames at ¼×, ½×, 1× and 2× the set exposure (4 s at ISO 1600 → 1, 2, 4 and 8 s, clamped to what the camera supports). Each frame is solved on its own. Failed frames are skipped, outliers (for example a frame where the phone was bumped) are rejected, and the rest are combined into one fix.
+
+### Advanced
+
+| Section | What's there |
+|---|---|
+| **Last capture** | Per-frame report (stars detected and identified, fit, motion warnings), the combined result with its random/systematic error split, and the frame with the most identified stars: identified stars circled in green and named, unmatched detections circled in red. |
+| **Capture** | Countdown (Off / 5 s / 10 s), exposure, ISO, exposure bracket on/off. |
+| **Calibration** | Status, the known-location field, **Use GPS**, **Calibrate**, **Forget calibration**. |
+| **Files** | **Save last capture (.zip)**: frames, camera/accelerometer data and the report as one zip, saved wherever you choose. The zip protects the binary frames, which some apps corrupt when sent as raw `.pgm`. **Keep every captured frame** also stores all frames under `Android/data/io.github.thejaraxlenuke.starlocator/files/frames/`, with save-as-zip and delete buttons. |
+| **Display** | Red night-vision colours. |
+| **Device** | Live camera elevation and calibration-pose check, UTC time, camera capabilities, and the learned lens correction (with reset). |
 
 ### One-time calibration (do this once)
 
 Uncalibrated fixes are typically **tens of km** off. In the field test that was 21 km, from a 0.19° error in the phone's "straight up" reading (accelerometer offset plus how the camera module sits). Calibration removes that error:
 
 1. Go to a spot whose position you know. Put the phone in the **mount** (or whatever fixed support you'll always use).
-2. Fill in the position:
-   - **USE GPS**: one GPS reading, accepted at ≤ 20 m accuracy, used for nothing else. It also reports how far the phone clock is off GPS time.
+2. Tap the **Not calibrated** badge (or Advanced › Calibration) and fill in the position:
+   - **Use GPS**: one GPS reading, accepted at ≤ 20 m accuracy, used for nothing else. It also reports how far the phone clock is off GPS time.
    - Or type it, e.g. `40.68925, -74.0445` or `40°41'21.3"N 74°02'40.2"W`.
-3. Tap **CALIBRATE HERE**. A normal countdown and bracket follow. The app reports how far off the uncalibrated result was, then saves the correction for this camera.
-4. From then on, use the **same mount, seating and case**. The live readout shows `pose OK` or warns `⚠ X° off calibration pose` when the pose differs by more than 3°. The calibration screen shows when and how it was made and the phone's temperature at the time.
+3. Tap **Calibrate**. A normal countdown and bracket follow. The app reports how far off the uncalibrated result was, then saves the correction for this camera.
+4. From then on, use the **same mount, seating and case**. A fix shows a warning when the pose differed from the calibration pose by more than 3°, or the phone's temperature by 10 °C or more. Advanced › Device shows the pose check live.
 
 If the calibration frames come from clearly different tilts (≥ 15° apart), the app instead solves the accelerometer bias and camera misalignment separately, and the calibration then works in any pose. In a fixed mount, the pose-specific correction is the simpler and exact one.
 
-If too few stars are found, increase the exposure or ISO, or find a darker spot.
+If too few stars are found, increase the exposure or ISO in Advanced › Capture, or find a darker spot.
 
 ## How it works
 

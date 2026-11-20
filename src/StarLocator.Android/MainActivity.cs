@@ -9,70 +9,78 @@ using Android.Content;
 using Android.Content.PM;
 using Android.Graphics;
 using Android.OS;
-using Android.Text;
 using Android.Views;
 using Android.Widget;
 using StarLocator.Core;
 
 namespace StarLocator.Droid
 {
+    /// <summary>What survives a theme switch (Activity.Recreate) while the app is running.</summary>
+    internal static class Session
+    {
+        public static PositionFix? LastFix;
+        public static DateTime LastFixLocal;
+        public static string LastReport = "";
+        public static string LastSummary = "";
+        public static Bitmap? LastImage;
+        public static string CalibrationCoords = "";
+        public static string? GpsFilledText;
+        public static string GpsNote = "";
+        public static List<string> LastWarnings = new List<string>();
+        public static int LastFrames;
+    }
+
     [Activity(Label = "Star Locator", MainLauncher = true, Exported = true,
               ScreenOrientation = ScreenOrientation.Portrait,
               Theme = "@android:style/Theme.Material.NoActionBar")]
-    public class MainActivity : Activity, TextureView.ISurfaceTextureListener
+    public partial class MainActivity : Activity
     {
         private const int CameraPermissionRequest = 42;
         private const int LocationPermissionRequest = 43;
-        private const int ExportRequest = 44;
+        private const int ExportLastRequest = 44;
+        private const int ExportKeptRequest = 45;
         /// <summary>A pose-specific calibration is trusted only within this many degrees of its pose.</summary>
         private const double PoseWarnDeg = 3.0;
         private static readonly CultureInfo Inv = CultureInfo.InvariantCulture;
 
-        // Night-vision friendly palette.
-        private static readonly Color Bg = Color.Rgb(8, 0, 0);
-        private static readonly Color Fg = Color.Rgb(255, 90, 80);
-        private static readonly Color Dim = Color.Rgb(170, 60, 55);
-
-        private TextureView _preview = null!;
-        private EditText _exposure = null!, _iso = null!;
-        private Button _captureBtn = null!, _calHereBtn = null!, _gpsBtn = null!, _mapBtn = null!, _forgetBtn = null!, _exportBtn = null!;
-        private EditText _calCoords = null!;
-        private TextView _calInfo = null!;
-        private Button? _activeBtn;
-        private string? _gpsFilledText;
-        private string _lastSummary = "";
-        private CheckBox _saveFrames = null!, _bracket = null!;
-        private RadioButton _delayOff = null!, _delay5 = null!, _delay10 = null!;
-        private Android.Media.ToneGenerator? _tone;
-        private CancellationTokenSource? _cts;
-        private TextView _status = null!, _result = null!, _tilt = null!;
-        private ImageView _image = null!;
-
+        private Ui _ui = null!;
+        private Handler _handler = null!;
         private CameraCapture? _camera;
+        private string _cameraNote = "";
         private GravitySampler _gravity = null!;
         private Task<CelestialLocator> _locatorTask = null!;
         private SensorCalibration? _calibration;
-        private PositionFix? _lastFix;
-        private bool _busy;
-        private SurfaceTexture? _surface;
-        private Handler _ui = null!;
+        private Android.Media.ToneGenerator? _tone;
+        private CancellationTokenSource? _cts;
+        private bool _busy, _gpsBusy;
+
+        // Settings (persisted)
+        private int _delayS = 10;
+        private double _exposureS = 4.0;
+        private int _iso = 1600;
+        private bool _bracket = true, _keepFrames, _redMode;
 
         protected override void OnCreate(Bundle? savedInstanceState)
         {
             base.OnCreate(savedInstanceState);
             Window?.AddFlags(WindowManagerFlags.KeepScreenOn);
-            _ui = new Handler(Looper.MainLooper!);
-            BuildUi();
+            _handler = new Handler(Looper.MainLooper!);
+            LoadSettings();
+            _ui = new Ui(this, _redMode ? Palette.Red : Palette.Night);
+            BuildScreens();
 
             _gravity = new GravitySampler(this);
-            _ui.PostDelayed(UpdateTilt, 500);
+            _handler.PostDelayed(UpdateLive, 500);
             // Building the star-pattern hash table takes a moment; do it once in the background.
             _locatorTask = Task.Run(() => new CelestialLocator());
-            SetStatus("Loading star catalog…");
-            _locatorTask.ContinueWith(t => RunOnUiThread(() =>
-                SetStatus(t.IsCompletedSuccessfully
-                    ? $"Catalog ready: {t.Result.Hash.Stars.Count} stars, {t.Result.Hash.TriangleCount:N0} star triangles."
-                    : "Catalog failed to load: " + t.Exception?.GetBaseException().Message)));
+            RefreshAll();
+            if (savedInstanceState?.GetBoolean("advanced") == true) ShowAdvanced(false);
+        }
+
+        protected override void OnSaveInstanceState(Bundle outState)
+        {
+            base.OnSaveInstanceState(outState);
+            outState.PutBoolean("advanced", _advancedVisible);
         }
 
         protected override void OnResume()
@@ -81,7 +89,15 @@ namespace StarLocator.Droid
             _gravity.Start();
             if (CheckSelfPermission(Android.Manifest.Permission.Camera) != Permission.Granted)
                 RequestPermissions(new[] { Android.Manifest.Permission.Camera }, CameraPermissionRequest);
-            else if (_surface != null) OpenCamera();
+            else OpenCamera();
+        }
+
+        protected override void OnPause()
+        {
+            _cts?.Cancel();
+            _gravity.Stop();
+            _camera?.Close();
+            base.OnPause();
         }
 
         protected override void OnDestroy()
@@ -91,118 +107,116 @@ namespace StarLocator.Droid
             base.OnDestroy();
         }
 
-        protected override void OnPause()
+#pragma warning disable CS0618, CS0672, CA1422 // OnBackPressed is deprecated on API 33+ but still delivered.
+        public override void OnBackPressed()
         {
-            _gravity.Stop();
-            _camera?.Close();
-            base.OnPause();
+            if (_advancedVisible) ShowMain();
+            else base.OnBackPressed();
         }
+#pragma warning restore CS0618, CS0672, CA1422
 
         public override void OnRequestPermissionsResult(int requestCode, string[] permissions, Permission[] grantResults)
         {
             base.OnRequestPermissionsResult(requestCode, permissions, grantResults);
             if (requestCode == CameraPermissionRequest)
             {
-                if (grantResults.Length > 0 && grantResults[0] == Permission.Granted) { if (_surface != null) OpenCamera(); }
-                else SetStatus("Camera permission is required to photograph the stars.");
+                if (grantResults.Length > 0 && grantResults[0] == Permission.Granted) OpenCamera();
+                else ShowMessage("Camera access needed", "Star Locator photographs the stars. Allow camera access in the phone's settings.", _ui.P.Error);
             }
             else if (requestCode == LocationPermissionRequest)
             {
                 if (CheckSelfPermission(Android.Manifest.Permission.AccessFineLocation) == Permission.Granted) ReadGps();
-                else SetStatus("Precise location was not allowed. You can type the coordinates instead (e.g. from a map app).");
+                else SetGpsNote("Precise location was not allowed. Type the coordinates instead (e.g. copied from a map app).");
             }
         }
 
-        // ---- TextureView.ISurfaceTextureListener ------------------------------------------------
+        // ---- Settings ---------------------------------------------------------------------------
 
-        public void OnSurfaceTextureAvailable(SurfaceTexture surface, int width, int height)
+        private void LoadSettings()
         {
-            _surface = surface;
-            if (CheckSelfPermission(Android.Manifest.Permission.Camera) == Permission.Granted) OpenCamera();
+            _delayS = int.TryParse(Storage.GetSetting(this, "delay", "10"), out int d) ? d : 10;
+            _exposureS = ParseDouble(Storage.GetSetting(this, "exposure", "4"), 4.0);
+            _iso = (int)ParseDouble(Storage.GetSetting(this, "iso", "1600"), 1600);
+            _bracket = Storage.GetSetting(this, "bracket", "1") == "1";
+            _keepFrames = Storage.GetSetting(this, "keep", "0") == "1";
+            _redMode = Storage.GetSetting(this, "red", "0") == "1";
         }
 
-        public bool OnSurfaceTextureDestroyed(SurfaceTexture surface)
-        {
-            _camera?.Close();
-            _surface = null;
-            return true;
-        }
+        private void SaveSetting(string key, string value) => Storage.SetSetting(this, key, value);
 
-        public void OnSurfaceTextureSizeChanged(SurfaceTexture surface, int width, int height) { }
-
-        public void OnSurfaceTextureUpdated(SurfaceTexture surface) { }
-
-        // ---- Camera ----------------------------------------------------------------------------
+        // ---- Camera -----------------------------------------------------------------------------
 
         private void OpenCamera()
         {
-            if (_surface == null) return;
             try
             {
-                _camera ??= CreateCamera();
-                _camera.Open(_surface);
-                _calibration = Storage.LoadCalibration(this, _camera.CameraId);
-                CameraInfo? info = _camera.Info;
-                if (info != null)
+                if (_camera == null)
                 {
-                    string manual = info.ManualSensor ? "" : "  ⚠ no manual exposure on this camera";
-                    double fscale = Storage.LoadFocalScale(this, _camera.CameraId);
-                    SetStatus($"Exposure up to {info.MaxExposureNs / 1e9:0.##} s, ISO {info.MinIso}–{info.MaxIso}.{manual}" +
-                              (Math.Abs(fscale - 1) > 0.002 ? $"\nLearned lens correction: focal length ×{fscale:F3}." : ""));
+                    _camera = new CameraCapture(this);
+                    _camera.StatusChanged += msg => RunOnUiThread(() => { _cameraNote = msg; RefreshDeviceInfo(); });
                 }
-                ShowCalibrationInfo();
-                UpdateButtons();
+                _camera.Open();
+                _calibration = Storage.LoadCalibration(this, _camera.CameraId);
+                RefreshAll();
+                if (_camera.Info != null && !_camera.Info.ManualSensor && Session.LastFix == null)
+                    ShowMessage("Limited camera", "This camera has no manual exposure, so long star exposures may not work.", _ui.P.Warn);
             }
             catch (Exception ex)
             {
-                SetStatus("Could not open camera: " + ex.Message);
+                ShowMessage("Camera unavailable", ex.Message, _ui.P.Error);
             }
         }
 
-        private CameraCapture CreateCamera()
-        {
-            var cam = new CameraCapture(this);
-            cam.StatusChanged += msg => RunOnUiThread(() => AppendStatus(msg));
-            return cam;
-        }
-
-        /// <summary>Everything one CAPTURE produced.</summary>
+        /// <summary>Everything one capture produced.</summary>
         private sealed class CaptureOutcome
         {
             public StringBuilder Report { get; } = new StringBuilder();
             public List<PositionFix> Fixes { get; } = new List<PositionFix>();
             public List<Shot> Shots { get; } = new List<Shot>();
             public Vec3 MeanGravity { get; set; }
+            public int Frames { get; set; }
         }
 
-        /// <summary>CAPTURE (calibrate = false) or CALIBRATE HERE (calibrate = true).</summary>
-        private async void OnCapture(bool calibrate, Button source)
+        private void OnRingTapped()
         {
-            if (_busy) { if (ReferenceEquals(source, _activeBtn)) _cts?.Cancel(); return; }  // the active button doubles as CANCEL
-            if (_camera == null) return;
-            if (!_camera.IsReady) { SetStatus("Camera is still starting…"); return; }
-            CameraInfo? info = _camera.Info;
-            if (info == null) return;
+            if (_busy) { _cts?.Cancel(); return; }
+            StartCapture(calibrate: false);
+        }
 
-            double calLat = 0, calLon = 0;
-            if (calibrate && !CoordinateParser.TryParse(_calCoords.Text, out calLat, out calLon, out string parseError))
+        /// <summary>A normal fix (calibrate = false) or the one-time calibration (calibrate = true).</summary>
+        private async void StartCapture(bool calibrate)
+        {
+            if (_busy || _gpsBusy) return;
+            if (_camera == null || !_camera.IsReady || _camera.Info == null)
             {
-                SetStatus("Calibration needs your exact position: " + parseError);
+                ShowMessage("Camera not ready", "Give it a second and try again.", _ui.P.Warn);
                 return;
             }
-            string method = calibrate && _gpsFilledText != null && _calCoords.Text == _gpsFilledText
+            CameraInfo info = _camera.Info;
+
+            double calLat = 0, calLon = 0;
+            if (calibrate)
+            {
+                Session.CalibrationCoords = _calCoords.Text ?? "";
+                if (!CoordinateParser.TryParse(Session.CalibrationCoords, out calLat, out calLon, out string parseError))
+                {
+                    SetGpsNote(parseError);
+                    return;
+                }
+            }
+            string method = calibrate && Session.GpsFilledText != null && Session.CalibrationCoords == Session.GpsFilledText
                 ? "known location (GPS)" : "known location (typed)";
 
+            ShowMain();
             _busy = true;
-            _activeBtn = source;
             _cts = new CancellationTokenSource();
             CancellationToken token = _cts.Token;
-            UpdateButtons();
+            RefreshButtons();
             try
             {
                 // Calibration frames are solved WITHOUT the old calibration: we want the raw error.
-                CaptureOutcome o = await CaptureAndSolveAsync(info, calibrate ? null : _calibration, token);
-
+                CaptureOutcome o = await CaptureAndSolveAsync(info, calibrate ? null : _calibration, calibrate, token);
+                string title;
                 if (calibrate)
                 {
                     double temp = ReadTemperatureC();
@@ -211,98 +225,116 @@ namespace StarLocator.Droid
                     {
                         _calibration = cal;
                         Storage.SaveCalibration(this, _camera.CameraId, cal);
-                        _result.Text = "✓ Calibration saved.\n" + msg;
+                        title = "Calibration saved";
+                        ShowMessage(title, double.IsNaN(cal.ErrorBeforeKm)
+                            ? "Future fixes will use it."
+                            : $"Before calibration this capture was {cal.ErrorBeforeKm:F1} km off. Future fixes will use it.", _ui.P.Ok);
                     }
                     else
                     {
-                        _result.Text = "Calibration failed: " + msg;
+                        title = "Calibration failed";
+                        ShowMessage(title, msg, _ui.P.Error);
                     }
-                    ShowCalibrationInfo();
+                    o.Report.Append('\n').Append(msg).Append('\n');
                 }
                 else
                 {
                     PositionFix? combined = PositionSolver.CombineFixes(o.Fixes, out string combineMsg);
                     if (combined != null)
                     {
-                        _lastFix = combined;
-                        var detail = new StringBuilder(combineMsg);
+                        var warnings = new List<string>();
                         if (_calibration != null)
                         {
                             double poseDiff = _calibration.PoseDifferenceDeg(o.MeanGravity);
                             if (_calibration.PoseSpecific && poseDiff > PoseWarnDeg)
-                                detail.Append($"\n⚠ Phone pose is {poseDiff:F1}° away from the calibration pose: the calibration may not apply. Use the same mount and seating.");
+                                warnings.Add($"Phone was {poseDiff:F1}° off the calibration pose");
                             double t = ReadTemperatureC();
                             if (!double.IsNaN(t) && !double.IsNaN(_calibration.TemperatureC) && Math.Abs(t - _calibration.TemperatureC) >= 10)
-                                detail.Append($"\nNote: phone is {t:F0} °C, calibrated at {_calibration.TemperatureC:F0} °C.");
+                                warnings.Add($"Phone is {t:F0} °C, calibrated at {_calibration.TemperatureC:F0} °C");
                         }
-                        ShowFix(combined, detail.ToString());
+                        else
+                        {
+                            warnings.Add("Not calibrated: expect tens of km of error");
+                        }
+                        Session.LastFix = combined;
+                        Session.LastFixLocal = DateTime.Now;
+                        title = "Fix";
+                        ShowFix(combined, o.Frames, warnings);
+                        o.Report.Append('\n').Append(combineMsg).Append('\n');
+                        o.Report.Append(string.Format(Inv, "Fix {0:F5}, {1:F5}  ±{2:F1} km (random {3:F1}, systematic {4:F1})\n",
+                            combined.LatitudeDeg, combined.LongitudeDeg, combined.UncertaintyKm,
+                            combined.RandomUncertaintyKm, combined.SystematicUncertaintyKm));
+                        foreach (string w in warnings) o.Report.Append("⚠ ").Append(w).Append('\n');
                     }
                     else
                     {
-                        _result.Text = "No position: " + combineMsg;
-                        o.Report.Append("Try a longer exposure, higher ISO, or a darker / clearer patch of sky.");
+                        title = "No fix";
+                        ShowMessage("No fix", "Not enough stars were recognised. Try a darker or clearer patch of sky, or a longer exposure in Advanced.", _ui.P.Warn);
+                        o.Report.Append('\n').Append(combineMsg).Append('\n');
                     }
                 }
-                SetStatus(o.Report.ToString());
-                _lastSummary = $"{DateTime.UtcNow:o}\n{_result.Text}\n\n{o.Report}\n\nCalibration: {(_calibration?.ToString() ?? "none")}\n";
+                string header = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} — {(calibrate ? "calibration" : "capture")}: {title}\n";
+                Session.LastReport = header + o.Report;
+                Session.LastSummary = $"{DateTime.UtcNow:o} UTC\n{Session.LastReport}\nCalibration: {(_calibration?.ToString() ?? "none")}\n";
             }
             catch (System.OperationCanceledException)
             {
-                _result.Text = "Capture cancelled.";
+                ShowMessage("Cancelled", calibrate ? "The calibration was not changed." : "", _ui.P.TextDim);
             }
             catch (Exception ex)
             {
-                SetStatus("Capture failed: " + ex.Message);
+                ShowMessage("Capture failed", ex.Message, _ui.P.Error);
             }
             finally
             {
                 _cts?.Dispose();
                 _cts = null;
                 _busy = false;
-                _activeBtn = null;
-                UpdateButtons();
+                RefreshAll();
             }
         }
 
-        /// <summary>Countdown, exposure bracket, then solve every frame. Shared by CAPTURE and CALIBRATE HERE.</summary>
-        private async Task<CaptureOutcome> CaptureAndSolveAsync(CameraInfo info, SensorCalibration? cal, CancellationToken token)
+        /// <summary>Countdown, exposure bracket, then solve every frame.</summary>
+        private async Task<CaptureOutcome> CaptureAndSolveAsync(CameraInfo info, SensorCalibration? cal, bool calibrating, CancellationToken token)
         {
             var o = new CaptureOutcome();
-            double expS = ParseDouble(_exposure.Text, 4.0);
-            int iso = (int)ParseDouble(_iso.Text, 1600);
-            long[] exposures = BuildExposures((long)(expS * 1e9), _bracket.Checked, info);
+            long[] exposures = BuildExposures((long)(_exposureS * 1e9), _bracket, info);
+            string mode = calibrating ? "Calibrating" : "Locating";
 
             // ---- Countdown so the phone can be placed camera-up (screen facing down) ----------
-            int delay = _delay10.Checked ? 10 : _delay5.Checked ? 5 : 0;
-            for (int sLeft = delay; sLeft > 0; sLeft--)
+            for (int sLeft = _delayS; sLeft > 0; sLeft--)
             {
-                _result.Text = $"Place the phone — capturing in {sLeft}…";
+                SetRing(sLeft.ToString(Inv), "place the phone", (_delayS - sLeft) / (float)_delayS);
+                SetRunning(mode, "Place the phone screen-down in the mount. Tap the circle to cancel.");
                 Beep(Android.Media.Tone.PropBeep, 120);
                 await Task.Delay(1000, token);
             }
-            if (delay > 0)
-            {
-                Beep(Android.Media.Tone.PropBeep2, 400);           // "go" signal, then let vibrations die down
-                await Task.Delay(700, token);
-            }
+            if (_delayS > 0) Beep(Android.Media.Tone.PropBeep2, 400);   // "go" signal
+
+            // Warm-up frame: lets focus and exposure settle; its image is discarded.
+            SetRing("•", "hold still", 0);
+            SetRunning(mode, "Don't touch the phone.");
+            await Task.Delay(400, token);
+            await _camera!.CaptureAsync(Math.Clamp(100_000_000L, info.MinExposureNs, info.MaxExposureNs), _iso);
 
             // ---- Capture every frame first (keeps the time the phone must stay still short) ---
             var frames = new List<(CapturedFrame Frame, GravityMeasurement? G)>();
             for (int i = 0; i < exposures.Length; i++)
             {
                 token.ThrowIfCancellationRequested();
-                _result.Text = $"Exposing frame {i + 1}/{exposures.Length} ({exposures[i] / 1e9:0.##} s)… don't touch the phone";
-                CapturedFrame frame = await _camera!.CaptureAsync(exposures[i], iso);
+                SetRing($"{i + 1}/{exposures.Length}", $"{exposures[i] / 1e9:0.##} s exposure", i / (float)exposures.Length);
+                CapturedFrame frame = await _camera.CaptureAsync(exposures[i], _iso);
                 await Task.Delay(100);           // let accelerometer samples cover the full window
                 frames.Add((frame, _gravity.Average(frame.StartRealtimeNs, frame.EndRealtimeNs)));
             }
             Beep(Android.Media.Tone.PropAck, 600);
-            _result.Text = "Done capturing — you can pick up the phone. Identifying stars…";
+            SetRunning(mode, "Done capturing — you can pick up the phone.");
 
-            // ---- Keep the frames: always the latest capture (for EXPORT), optionally permanently ---
+            // ---- Keep the frames: always the latest capture (for export), optionally permanently ---
             string lastDir = Storage.LastCaptureDir(this);
             string keptDir = Storage.KeptFramesDir(this);
-            bool keep = _saveFrames.Checked;
+            bool keep = _keepFrames;
+            SetRing("…", "saving frames", 0);
             await Task.Run(() =>
             {
                 Storage.ClearDir(lastDir);
@@ -313,31 +345,33 @@ namespace StarLocator.Droid
                     if (keep) Storage.SaveFrame(keptDir, frame, g);
                 }
             });
-            if (keep) o.Report.Append("Frames saved to ").Append(keptDir).Append('\n');
 
             // ---- Solve each frame independently -----------------------------------------------
             CelestialLocator locator = await _locatorTask;
-            string camId = _camera!.CameraId;
+            string camId = _camera.CameraId;
             double fscale = Storage.LoadFocalScale(this, camId);
             var learned = new List<double>();
             Vec3 gSum = Vec3.Zero;
             (CapturedFrame Frame, FrameResult Result)? best = null;
+            o.Frames = frames.Count;
             for (int i = 0; i < frames.Count; i++)
             {
+                token.ThrowIfCancellationRequested();
+                SetRing("…", "identifying stars", i / (float)frames.Count);
                 (CapturedFrame frame, GravityMeasurement? g) = frames[i];
-                string label = $"Frame {i + 1} ({frame.ExposureNs / 1e9:0.##} s): ";
-                if (g == null) { o.Report.Append(label).Append("no accelerometer data.\n"); continue; }
+                string label = $"Frame {i + 1} ({frame.ExposureNs / 1e9:0.##} s, ISO {frame.Iso}): ";
+                if (g == null) { o.Report.Append(label).Append("no accelerometer data\n"); continue; }
                 gSum += g.Mean;
                 CameraModel cam = frame.Camera.Clone();
                 cam.Fx *= fscale;
                 cam.Fy *= fscale;
                 FrameResult r = await Task.Run(() =>
                     locator.ProcessFrame(frame.Luma, frame.Width, frame.Height, frame.RowStride, cam, g, frame.UtcMidExposure, cal));
-                o.Report.Append(label).Append(r.Detections.Count).Append(" detections, ");
+                o.Report.Append(label).Append(r.Detections.Count).Append(" stars detected, ");
                 if (r.Fix != null && r.Shot != null && r.Identification != null)
                 {
                     IdentificationResult id = r.Identification;
-                    o.Report.Append($"{id.Matches.Count} identified, RMS {id.RmsDeg:F3}°");
+                    o.Report.Append($"{id.Matches.Count} identified, fit {id.RmsDeg:F3}°");
                     if (g.StdDev > 0.06) o.Report.Append($", ⚠ moved (σ {g.StdDev:F2} m/s²)");
                     o.Report.Append('\n');
                     o.Fixes.Add(r.Fix);
@@ -364,15 +398,16 @@ namespace StarLocator.Droid
                 if (Math.Abs(median / fscale - 1) > 0.002)
                 {
                     Storage.SaveFocalScale(this, camId, median);
-                    o.Report.Append($"Lens correction learned: the phone's focal length ×{median:F4} (saved for this camera).\n");
+                    o.Report.Append($"Lens correction learned: focal length ×{median:F4} (saved for this camera)\n");
                 }
             }
+            if (keep) o.Report.Append("Frames kept on the phone (Advanced › Files)\n");
 
             if (best != null)
             {
                 var b = best.Value;
                 Bitmap bmp = await Task.Run(() => ResultRenderer.Render(b.Frame, b.Result, 1440));
-                _image.SetImageBitmap(bmp);
+                Session.LastImage = bmp;   // the previous bitmap may still be on screen: let the GC free it
             }
             return o;
         }
@@ -399,12 +434,15 @@ namespace StarLocator.Droid
             }
             catch (Exception)
             {
-                // Some devices refuse a ToneGenerator (e.g. audio focus); the countdown still works silently.
+                // Some devices refuse a ToneGenerator; the countdown still works silently.
             }
         }
 
+        // ---- GPS for the one-time calibration ---------------------------------------------------
+
         private void OnUseGps()
         {
+            if (_gpsBusy) { _cts?.Cancel(); return; }
             if (_busy) return;
             if (CheckSelfPermission(Android.Manifest.Permission.AccessFineLocation) != Permission.Granted)
             {
@@ -417,81 +455,95 @@ namespace StarLocator.Droid
 
         private async void ReadGps()
         {
-            if (_busy) return;
-            _busy = true;
-            _activeBtn = _gpsBtn;
+            if (_busy || _gpsBusy) return;
+            _gpsBusy = true;
             _cts = new CancellationTokenSource();
-            UpdateButtons();
+            RefreshButtons();
             try
             {
-                SetStatus("Waiting for GPS (used only for this one-time calibration)…");
+                SetGpsNote("Waiting for GPS…");
                 GpsFix fix = await GpsReader.GetFixAsync(this, 20, TimeSpan.FromSeconds(120),
-                                                         msg => RunOnUiThread(() => SetStatus(msg)), _cts.Token);
+                                                         msg => RunOnUiThread(() => SetGpsNote(msg)), _cts.Token);
                 string text = string.Format(Inv, "{0:F6}, {1:F6}", fix.Latitude, fix.Longitude);
                 _calCoords.Text = text;
-                _gpsFilledText = text;
-                double km = Math.Abs(fix.ClockOffsetS) * 0.46;
-                SetStatus($"GPS position filled in (±{fix.AccuracyM:F0} m). " +
-                          $"Phone clock is {Math.Abs(fix.ClockOffsetS):F1} s {(fix.ClockOffsetS > 0 ? "behind" : "ahead of")} GPS time " +
-                          $"(≈{km:F1} km of longitude at the equator).\nNow mount the phone and tap CALIBRATE HERE.");
+                Session.CalibrationCoords = text;
+                Session.GpsFilledText = text;
+                SetGpsNote($"GPS ±{fix.AccuracyM:F0} m. Phone clock is {Math.Abs(fix.ClockOffsetS):F1} s " +
+                           $"{(fix.ClockOffsetS > 0 ? "behind" : "ahead of")} GPS time (≈{Math.Abs(fix.ClockOffsetS) * 0.46:F1} km).");
             }
             catch (System.OperationCanceledException)
             {
-                SetStatus("GPS cancelled.");
+                SetGpsNote("GPS cancelled.");
             }
             catch (Exception ex)
             {
-                SetStatus("GPS failed: " + ex.Message + "\nYou can type the coordinates instead.");
+                SetGpsNote(ex.Message);
             }
             finally
             {
                 _cts?.Dispose();
                 _cts = null;
-                _busy = false;
-                _activeBtn = null;
-                UpdateButtons();
+                _gpsBusy = false;
+                RefreshButtons();
             }
         }
 
-        private void OnExport()
+        private void SetGpsNote(string text)
         {
-            string dir = Storage.LastCaptureDir(this);
-            if (!System.IO.Directory.Exists(dir) || System.IO.Directory.GetFiles(dir).Length == 0)
+            Session.GpsNote = text;
+            if (_gpsNote != null) { _gpsNote.Text = text; _gpsNote.Visibility = string.IsNullOrEmpty(text) ? ViewStates.Gone : ViewStates.Visible; }
+        }
+
+        // ---- Files ------------------------------------------------------------------------------
+
+        private void StartExport(int requestCode)
+        {
+            string dir = requestCode == ExportLastRequest ? Storage.LastCaptureDir(this) : Storage.KeptFramesDir(this);
+            if (Storage.FolderSize(dir).Files == 0)
             {
-                SetStatus("Nothing to export yet: take a capture first.");
+                Toast.MakeText(this, "Nothing to export yet.", ToastLength.Short)?.Show();
                 return;
             }
             var intent = new Intent(Intent.ActionCreateDocument);
             intent.AddCategory(Intent.CategoryOpenable);
             intent.SetType("application/zip");
-            intent.PutExtra(Intent.ExtraTitle, $"starlocator_{DateTime.UtcNow:yyyyMMdd_HHmmss}.zip");
-            try { StartActivityForResult(intent, ExportRequest); }
-            catch (ActivityNotFoundException) { SetStatus("This phone has no file picker to save the zip."); }
+            string what = requestCode == ExportLastRequest ? "last" : "kept";
+            intent.PutExtra(Intent.ExtraTitle, $"starlocator_{what}_{DateTime.UtcNow:yyyyMMdd_HHmmss}.zip");
+            try { StartActivityForResult(intent, requestCode); }
+            catch (ActivityNotFoundException) { Toast.MakeText(this, "No file picker available.", ToastLength.Long)?.Show(); }
         }
 
         protected override async void OnActivityResult(int requestCode, [Android.Runtime.GeneratedEnum] Result resultCode, Intent? data)
         {
             base.OnActivityResult(requestCode, resultCode, data);
-            if (requestCode != ExportRequest || resultCode != Result.Ok || data?.Data == null) return;
+            if ((requestCode != ExportLastRequest && requestCode != ExportKeptRequest) || resultCode != Result.Ok || data?.Data == null) return;
             Android.Net.Uri uri = data.Data;
-            string dir = Storage.LastCaptureDir(this);
-            string summary = _lastSummary;
+            string dir = requestCode == ExportLastRequest ? Storage.LastCaptureDir(this) : Storage.KeptFramesDir(this);
+            string summary = Session.LastSummary;
             try
             {
-                SetStatus("Writing zip…");
                 int n = await Task.Run(() =>
                 {
                     System.IO.Stream? s = ContentResolver?.OpenOutputStream(uri);
                     if (s == null) throw new InvalidOperationException("Could not open the destination.");
                     return Storage.WriteZip(s, dir, summary);
                 });
-                SetStatus($"Exported {n} files (frames + camera/accelerometer data) as a zip.");
+                Toast.MakeText(this, $"Saved {n} files as a zip.", ToastLength.Short)?.Show();
             }
             catch (Exception ex)
             {
-                SetStatus("Export failed: " + ex.Message);
+                Toast.MakeText(this, "Export failed: " + ex.Message, ToastLength.Long)?.Show();
             }
         }
+
+        private void DeleteKeptFrames()
+        {
+            Storage.ClearDir(Storage.KeptFramesDir(this));
+            RefreshFiles();
+            Toast.MakeText(this, "Kept frames deleted.", ToastLength.Short)?.Show();
+        }
+
+        // ---- Misc -------------------------------------------------------------------------------
 
         /// <summary>Battery temperature in °C (no permission needed), or NaN.</summary>
         private double ReadTemperatureC()
@@ -501,227 +553,24 @@ namespace StarLocator.Droid
             return t == int.MinValue ? double.NaN : t / 10.0;
         }
 
-        private void ShowCalibrationInfo()
-        {
-            if (_calibration == null)
-            {
-                _calInfo.Text = "Not calibrated. Uncalibrated fixes are typically tens of km off.";
-                return;
-            }
-            SensorCalibration c = _calibration;
-            var sb = new StringBuilder();
-            sb.Append($"Calibrated {c.CreatedUtc.ToLocalTime():yyyy-MM-dd HH:mm} — {c.Method}. ");
-            sb.Append(c.PoseSpecific ? "Valid for the pose it was made in (use the same mount). " : "Valid in any pose. ");
-            if (!double.IsNaN(c.TemperatureC)) sb.Append($"Phone was {c.TemperatureC:F0} °C. ");
-            if (!double.IsNaN(c.ErrorBeforeKm)) sb.Append($"Uncalibrated error then: {c.ErrorBeforeKm:F1} km.");
-            _calInfo.Text = sb.ToString();
-        }
-
-        private void ShowFix(PositionFix fix, string detail)
-        {
-            _result.Text =
-                $"{Astronomy.ToDms(fix.LatitudeDeg, true)}   {Astronomy.ToDms(fix.LongitudeDeg, false)}\n" +
-                string.Format(Inv, "{0:F4}, {1:F4}   ±{2:F0} km (1σ est.)\n", fix.LatitudeDeg, fix.LongitudeDeg, fix.UncertaintyKm) +
-                detail + "\n" + fix.Notes;
-            UpdateButtons();
-        }
-
         private void OpenMap()
         {
-            if (_lastFix == null) return;
-            string lat = _lastFix.LatitudeDeg.ToString("F5", Inv), lon = _lastFix.LongitudeDeg.ToString("F5", Inv);
-            try
-            {
-                var intent = new Intent(Intent.ActionView, Android.Net.Uri.Parse($"geo:{lat},{lon}?q={lat},{lon}(Star fix)"));
-                StartActivity(intent);
-            }
-            catch (ActivityNotFoundException)
-            {
-                SetStatus("No map app installed.");
-            }
+            PositionFix? f = Session.LastFix;
+            if (f == null) return;
+            string lat = f.LatitudeDeg.ToString("F5", Inv), lon = f.LongitudeDeg.ToString("F5", Inv);
+            try { StartActivity(new Intent(Intent.ActionView, Android.Net.Uri.Parse($"geo:{lat},{lon}?q={lat},{lon}(Star fix)"))); }
+            catch (ActivityNotFoundException) { Toast.MakeText(this, "No map app installed.", ToastLength.Short)?.Show(); }
         }
 
-        private void UpdateTilt()
+        private void CopyFix()
         {
-            Vec3? a = _gravity.Latest;
-            if (a.HasValue)
-            {
-                // Camera elevation above the horizon: the back camera looks along device -Z.
-                Vec3 up = a.Value.Normalized();
-                double elev = Math.Asin(Math.Clamp(-up.Z, -1, 1)) * Astronomy.RadToDeg;
-                string pose = "";
-                if (_calibration != null && _calibration.PoseSpecific)
-                {
-                    double d = _calibration.PoseDifferenceDeg(a.Value);
-                    pose = d > PoseWarnDeg ? $"   ⚠ {d:F1}° off calibration pose" : $"   pose OK ({d:F1}°)";
-                }
-                _tilt.Text = $"Camera elevation {elev:F0}°   UTC {DateTime.UtcNow:HH:mm:ss}{pose}";
-            }
-            if (!IsFinishing) _ui.PostDelayed(UpdateTilt, 500);
+            PositionFix? f = Session.LastFix;
+            if (f == null) return;
+            string text = string.Format(Inv, "{0:F5}, {1:F5}", f.LatitudeDeg, f.LongitudeDeg);
+            var cm = GetSystemService(ClipboardService) as Android.Content.ClipboardManager;
+            if (cm != null) cm.PrimaryClip = ClipData.NewPlainText("Star fix", text);
+            Toast.MakeText(this, "Coordinates copied", ToastLength.Short)?.Show();
         }
-
-        // ---- UI construction --------------------------------------------------------------------
-
-        private void BuildUi()
-        {
-            var scroll = new ScrollView(this);
-            scroll.SetBackgroundColor(Bg);
-            var root = new LinearLayout(this) { Orientation = Orientation.Vertical };
-            root.SetPadding(24, 24, 24, 24);
-            scroll.AddView(root);
-
-            root.AddView(Label("Star Locator — position from the night sky", 20, true));
-            root.AddView(Label("Position from the stars: camera + accelerometer + clock (Marbel et al., Sensors 2020 star tracker). " +
-                               "No network. GPS is used only if you choose it for the one-time calibration.", 12, false));
-
-            int width = Resources?.DisplayMetrics?.WidthPixels ?? 1080;
-            _preview = new TextureView(this) { SurfaceTextureListener = this };
-            root.AddView(_preview, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MatchParent, width * 4 / 3));
-
-            _tilt = Label("", 13, false);
-            root.AddView(_tilt);
-
-            var settings = new LinearLayout(this) { Orientation = Orientation.Horizontal };
-            settings.AddView(Label("Exposure s ", 15, false));
-            _exposure = NumberBox("4");
-            settings.AddView(_exposure, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WrapContent, 1f));
-            settings.AddView(Label("  ISO ", 15, false));
-            _iso = NumberBox("1600");
-            settings.AddView(_iso, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WrapContent, 1f));
-            root.AddView(settings);
-
-            var delayRow = new LinearLayout(this) { Orientation = Orientation.Horizontal };
-            delayRow.AddView(Label("Countdown ", 15, false));
-            var delayGroup = new RadioGroup(this) { Orientation = Orientation.Horizontal };
-            _delayOff = MakeRadio("Off");
-            _delay5 = MakeRadio("5 s");
-            _delay10 = MakeRadio("10 s");
-            delayGroup.AddView(_delayOff);
-            delayGroup.AddView(_delay5);
-            delayGroup.AddView(_delay10);
-            _delay10.Checked = true;
-            delayRow.AddView(delayGroup);
-            root.AddView(delayRow);
-
-            _bracket = new CheckBox(this) { Text = "Exposure bracket: ¼×, ½×, 1×, 2× (each frame solved, fixes combined)", Checked = true };
-            _bracket.SetTextColor(Dim);
-            root.AddView(_bracket);
-
-            _captureBtn = MakeButton("CAPTURE", (s, e) => OnCapture(false, _captureBtn));
-            root.AddView(_captureBtn, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.WrapContent));
-
-            _saveFrames = new CheckBox(this) { Text = "Save frames for PC replay", Checked = false };
-            _saveFrames.SetTextColor(Dim);
-            root.AddView(_saveFrames);
-
-            _result = Label("", 18, true);
-            root.AddView(_result);
-            _status = Label("", 13, false);
-            _status.Typeface = Typeface.Monospace;
-            root.AddView(_status);
-
-            _image = new ImageView(this);
-            _image.SetAdjustViewBounds(true);
-            root.AddView(_image, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.WrapContent));
-
-            var bottom = new LinearLayout(this) { Orientation = Orientation.Horizontal };
-            _mapBtn = MakeButton("OPEN IN MAP", (s, e) => OpenMap());
-            _exportBtn = MakeButton("EXPORT FRAMES (ZIP)", (s, e) => OnExport());
-            bottom.AddView(_mapBtn, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WrapContent, 1f));
-            bottom.AddView(_exportBtn, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WrapContent, 1f));
-            root.AddView(bottom);
-
-            // ---- One-time calibration ----
-            root.AddView(Label("One-time calibration", 17, true));
-            root.AddView(Label("At a spot whose position you know, put the phone in your mount and calibrate once. " +
-                               "Fill in the position with GPS or type it (decimal or 40°41'21.3\"N 74°02'40.2\"W).", 12, false));
-            _calCoords = new EditText(this) { Hint = "latitude, longitude" };
-            _calCoords.SetTextColor(Fg);
-            _calCoords.SetHintTextColor(Dim);
-            root.AddView(_calCoords);
-            var calRow = new LinearLayout(this) { Orientation = Orientation.Horizontal };
-            _gpsBtn = MakeButton("USE GPS", (s, e) => { if (_busy && ReferenceEquals(_activeBtn, _gpsBtn)) _cts?.Cancel(); else OnUseGps(); });
-            _calHereBtn = MakeButton("CALIBRATE HERE", (s, e) => OnCapture(true, _calHereBtn));
-            calRow.AddView(_gpsBtn, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WrapContent, 1f));
-            calRow.AddView(_calHereBtn, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WrapContent, 1f));
-            root.AddView(calRow);
-            _calInfo = Label("", 12, false);
-            root.AddView(_calInfo);
-            _forgetBtn = MakeButton("FORGET CALIBRATION", (s, e) =>
-            {
-                if (_camera != null) Storage.ClearCalibration(this, _camera.CameraId);
-                _calibration = null;
-                ShowCalibrationInfo();
-                SetStatus("Calibration cleared.");
-                UpdateButtons();
-            });
-            root.AddView(_forgetBtn);
-
-            root.AddView(Label(
-                "How to use\n" +
-                "1. Go outside on a clear night, let the screen dim adapt, avoid the Moon.\n" +
-                "2. Tap CAPTURE, then during the countdown (beeps) place the phone screen-down on a rock, car roof or tripod " +
-                "with the back camera aimed 45–90° up.\n" +
-                "3. Don't touch it until the long 'done' tone. With the bracket on, 4 exposures are taken and combined. " +
-                "Increase exposure/ISO if few stars are found.\n" +
-                "4. Calibrate once (below) with the phone in your mount at a spot of known position. " +
-                "Afterwards, always use the same mount and seating; the app warns if the pose differs by more than 3°.\n" +
-                "5. EXPORT FRAMES saves the last capture as a zip (frames + camera/accelerometer data) for analysis.\n" +
-                "Accuracy: typically tens of km uncalibrated, a few km calibrated. Phone clock error of 1 s ≈ 0.4 km.", 12, false));
-
-            SetContentView(scroll);
-            ShowCalibrationInfo();
-            UpdateButtons();
-        }
-
-        private TextView Label(string text, float sp, bool bold)
-        {
-            var t = new TextView(this) { Text = text, TextSize = sp };
-            t.SetTextColor(bold ? Fg : Dim);
-            if (bold) t.SetTypeface(null, TypefaceStyle.Bold);
-            t.SetPadding(0, 8, 0, 8);
-            return t;
-        }
-
-        private RadioButton MakeRadio(string text)
-        {
-            var r = new RadioButton(this) { Text = text, Id = View.GenerateViewId() };
-            r.SetTextColor(Fg);
-            return r;
-        }
-
-        private EditText NumberBox(string value)
-        {
-            var e = new EditText(this) { Text = value, InputType = InputTypes.ClassNumber | InputTypes.NumberFlagDecimal };
-            e.SetTextColor(Fg);
-            return e;
-        }
-
-        private Button MakeButton(string text, EventHandler onClick)
-        {
-            var b = new Button(this) { Text = text, TextSize = 12 };
-            b.SetTextColor(Fg);
-            b.SetBackgroundColor(Color.Rgb(40, 0, 0));
-            b.Click += onClick;
-            return b;
-        }
-
-        private void UpdateButtons()
-        {
-            if (_captureBtn == null || _calHereBtn == null) return;
-            _captureBtn.Text = _busy && ReferenceEquals(_activeBtn, _captureBtn) ? "CANCEL" : "CAPTURE";
-            _calHereBtn.Text = _busy && ReferenceEquals(_activeBtn, _calHereBtn) ? "CANCEL" : "CALIBRATE HERE";
-            _gpsBtn.Text = _busy && ReferenceEquals(_activeBtn, _gpsBtn) ? "CANCEL GPS" : "USE GPS";
-            _captureBtn.Enabled = !_busy || ReferenceEquals(_activeBtn, _captureBtn);
-            _calHereBtn.Enabled = !_busy || ReferenceEquals(_activeBtn, _calHereBtn);
-            _gpsBtn.Enabled = !_busy || ReferenceEquals(_activeBtn, _gpsBtn);
-            _mapBtn.Enabled = _lastFix != null;
-            _exportBtn.Enabled = !_busy;
-            _forgetBtn.Enabled = !_busy && _calibration != null;
-        }
-
-        private void SetStatus(string s) { if (_status != null) _status.Text = s; }
-        private void AppendStatus(string s) { if (_status != null) _status.Text = (_status.Text + "\n" + s).Trim(); }
 
         private static double ParseDouble(string? s, double fallback) =>
             double.TryParse(s?.Replace(',', '.'), NumberStyles.Float, Inv, out double v) && v > 0 ? v : fallback;
