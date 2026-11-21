@@ -157,6 +157,56 @@ namespace StarLocator.Droid
         // ---- Frames -------------------------------------------------------------------------------
 
         /// <summary>Folder holding the most recent capture (replaced by every capture).</summary>
+        // ---- Fix history --------------------------------------------------------------------------
+        // Kept in the app's private storage (not the shared frames folder): a location history is personal.
+
+        private const int MaxHistory = 1000;
+        private static string HistoryPath(Context ctx) => Path.Combine(ctx.FilesDir!.AbsolutePath, "history.tsv");
+
+        /// <summary>Appends a fix to the history (oldest entries beyond 1000 are dropped).</summary>
+        public static void AddHistory(Context ctx, HistoryEntry e)
+        {
+            string path = HistoryPath(ctx);
+            File.AppendAllText(path, e.ToLine() + "\n", new UTF8Encoding(false));
+            string[] lines = File.ReadAllLines(path);
+            if (lines.Length > MaxHistory)
+                File.WriteAllLines(path, lines[(lines.Length - MaxHistory)..], new UTF8Encoding(false));
+        }
+
+        /// <summary>All saved fixes, newest first. Unreadable lines are skipped.</summary>
+        public static List<HistoryEntry> LoadHistory(Context ctx)
+        {
+            var list = new List<HistoryEntry>();
+            string path = HistoryPath(ctx);
+            if (!File.Exists(path)) return list;
+            foreach (string line in File.ReadAllLines(path))
+                if (HistoryEntry.TryParse(line, out HistoryEntry? e)) list.Add(e!);
+            list.Reverse();
+            return list;
+        }
+
+        /// <summary>Removes one fix (matched by its time stamp and position).</summary>
+        public static void DeleteHistory(Context ctx, HistoryEntry e)
+        {
+            string path = HistoryPath(ctx);
+            if (!File.Exists(path)) return;
+            string target = e.ToLine();
+            var keep = new List<string>();
+            bool removed = false;
+            foreach (string line in File.ReadAllLines(path))
+            {
+                if (!removed && line == target) { removed = true; continue; }
+                keep.Add(line);
+            }
+            File.WriteAllLines(path, keep, new UTF8Encoding(false));
+        }
+
+        public static void ClearHistory(Context ctx)
+        {
+            string path = HistoryPath(ctx);
+            if (File.Exists(path)) File.Delete(path);
+        }
+
         public static string LastCaptureDir(Context ctx) => Path.Combine(BaseDir(ctx), "last");
 
         /// <summary>Folder for permanently kept frames ("Save frames for PC replay").</summary>
@@ -234,5 +284,36 @@ namespace StarLocator.Droid
         }
 
         private static string R(double v) => v.ToString("R", Inv);
+    }
+
+    /// <summary>One fix in the history list.</summary>
+    public sealed class HistoryEntry
+    {
+        private static readonly CultureInfo Inv = CultureInfo.InvariantCulture;
+        public DateTime Utc { get; init; }
+        public double Latitude { get; init; }
+        public double Longitude { get; init; }
+        public double UncertaintyKm { get; init; }
+        public int Frames { get; init; }
+        public bool Calibrated { get; init; }
+        public int Warnings { get; init; }
+
+        public string ToLine() => string.Join("\t",
+            Utc.ToString("o", Inv), Latitude.ToString("F6", Inv), Longitude.ToString("F6", Inv),
+            UncertaintyKm.ToString("F2", Inv), Frames.ToString(Inv), Calibrated ? "1" : "0", Warnings.ToString(Inv));
+
+        public static bool TryParse(string line, out HistoryEntry? e)
+        {
+            e = null;
+            string[] f = line.Split('\t');
+            if (f.Length < 7) return false;
+            if (!DateTime.TryParse(f[0], Inv, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out DateTime utc)) return false;
+            if (!double.TryParse(f[1], NumberStyles.Float, Inv, out double lat) || !double.TryParse(f[2], NumberStyles.Float, Inv, out double lon)) return false;
+            double.TryParse(f[3], NumberStyles.Float, Inv, out double unc);
+            int.TryParse(f[4], NumberStyles.Integer, Inv, out int frames);
+            int.TryParse(f[6], NumberStyles.Integer, Inv, out int warnings);
+            e = new HistoryEntry { Utc = utc, Latitude = lat, Longitude = lon, UncertaintyKm = unc, Frames = frames, Calibrated = f[5] == "1", Warnings = warnings };
+            return true;
+        }
     }
 }

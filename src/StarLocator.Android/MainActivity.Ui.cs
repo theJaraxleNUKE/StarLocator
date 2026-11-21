@@ -12,7 +12,11 @@ namespace StarLocator.Droid
     /// <summary>Screen layout: a minimal main screen and an "Advanced" screen, swapped in place.</summary>
     public partial class MainActivity
     {
-        private bool _advancedVisible;
+        private bool _advancedVisible, _historyVisible;
+        private ScrollView _historyScreen = null!;
+        private LinearLayout _historyList = null!;
+        private TextView _historyEmpty = null!;
+        private Button _historyClear = null!;
         private View _mainScreen = null!;
         private ScrollView _advancedScreen = null!;
 
@@ -70,8 +74,11 @@ namespace StarLocator.Droid
             _mainScreen = BuildMain();
             _advancedScreen = BuildAdvanced();
             _advancedScreen.Visibility = ViewStates.Gone;
+            _historyScreen = BuildHistory();
+            _historyScreen.Visibility = ViewStates.Gone;
             root.AddView(_mainScreen, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.MatchParent));
             root.AddView(_advancedScreen, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.MatchParent));
+            root.AddView(_historyScreen, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.MatchParent));
             root.SetOnApplyWindowInsetsListener(new InsetsListener());
             SetContentView(root);
 #pragma warning disable CS0618, CA1422 // Ignored (bars are transparent) on Android 15+, still used below it.
@@ -116,7 +123,12 @@ namespace StarLocator.Droid
             top.SetGravity(GravityFlags.CenterVertical);
             TextView title = _ui.Text("Star Locator", 22, p.Text, bold: true);
             top.AddView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WrapContent, 1f));
-            top.AddView(_ui.Button("Advanced", Ui.ButtonKind.Tonal, (s, e) => ShowAdvanced(false)));
+            Button historyBtn = _ui.Button("History", Ui.ButtonKind.Tonal, (s, e) => ShowHistory());
+            historyBtn.SetPadding(_ui.Dp(16), 0, _ui.Dp(16), 0);
+            top.AddView(historyBtn);
+            Button advancedBtn = _ui.Button("Advanced", Ui.ButtonKind.Tonal, (s, e) => ShowAdvanced(false));
+            advancedBtn.SetPadding(_ui.Dp(16), 0, _ui.Dp(16), 0);
+            top.AddView(advancedBtn, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WrapContent, ViewGroup.LayoutParams.WrapContent) { LeftMargin = _ui.Dp(8) });
             col.AddView(top);
 
             // Result card
@@ -345,8 +357,95 @@ namespace StarLocator.Droid
             SaveSetting("iso", _iso.ToString(Inv));
         }
 
+        // ---- History screen -----------------------------------------------------------------------
+
+        private ScrollView BuildHistory()
+        {
+            Palette p = _ui.P;
+            var scroll = new ScrollView(this);
+            var col = new LinearLayout(this) { Orientation = Orientation.Vertical };
+            col.SetPadding(_ui.Dp(20), _ui.Dp(12), _ui.Dp(20), _ui.Dp(32));
+            scroll.AddView(col);
+
+            var top = new LinearLayout(this) { Orientation = Orientation.Horizontal };
+            top.SetGravity(GravityFlags.CenterVertical);
+            top.AddView(_ui.Button("‹  Back", Ui.ButtonKind.Text, (s, e) => ShowMain()));
+            top.AddView(_ui.Text("History", 22, p.Text, bold: true), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WrapContent, 1f));
+            _historyClear = _ui.Button("Clear", Ui.ButtonKind.Text, (s, e) => Confirm("Clear history?",
+                "All saved fixes are removed from the phone.", "Clear", () => { Storage.ClearHistory(this); RefreshHistory(); }));
+            top.AddView(_historyClear);
+            col.AddView(top);
+
+            TextView hint = _ui.Text("Tap a fix to open it in your map app. Touch and hold to delete it.", 13, p.TextDim);
+            col.AddView(hint, Ui.Gap(_ui.Dp(8)));
+            _historyEmpty = _ui.Text("No fixes yet. Each location you capture is saved here.", 15, p.TextDim);
+            col.AddView(_historyEmpty, Ui.Gap(_ui.Dp(20)));
+            _historyList = new LinearLayout(this) { Orientation = Orientation.Vertical };
+            col.AddView(_historyList, Ui.Gap(_ui.Dp(12)));
+            return scroll;
+        }
+
+        private void RefreshHistory()
+        {
+            Palette p = _ui.P;
+            _historyList.RemoveAllViews();
+            List<HistoryEntry> entries;
+            try { entries = Storage.LoadHistory(this); }
+            catch (System.IO.IOException) { entries = new List<HistoryEntry>(); }
+            _historyEmpty.Visibility = entries.Count == 0 ? ViewStates.Visible : ViewStates.Gone;
+            _historyClear.Visibility = entries.Count == 0 ? ViewStates.Gone : ViewStates.Visible;
+            foreach (HistoryEntry h in entries)
+            {
+                DateTime local = h.Utc.ToLocalTime();
+                var row = new LinearLayout(this) { Orientation = Orientation.Vertical, Clickable = true, Focusable = true };
+                row.Background = new Android.Graphics.Drawables.RippleDrawable(
+                    Android.Content.Res.ColorStateList.ValueOf(Color.Argb(60, p.Text.R, p.Text.G, p.Text.B)),
+                    Ui.Rounded(p.Surface, _ui.Dp(16)), null);
+                row.SetPadding(_ui.Dp(16), _ui.Dp(14), _ui.Dp(16), _ui.Dp(14));
+                row.SetMinimumHeight(_ui.Dp(48));
+
+                var line1 = new LinearLayout(this) { Orientation = Orientation.Horizontal };
+                line1.SetGravity(GravityFlags.CenterVertical);
+                line1.AddView(_ui.Text(local.ToString("ddd d MMM yyyy · HH:mm", Inv), 16, p.Text, bold: true),
+                              new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WrapContent, 1f));
+                string acc = h.UncertaintyKm < 10 ? h.UncertaintyKm.ToString("F1", Inv) : h.UncertaintyKm.ToString("F0", Inv);
+                line1.AddView(_ui.Text($"± {acc} km", 14, p.Primary, bold: true));
+                row.AddView(line1);
+
+                string coords = string.Format(Inv, "{0:F5}, {1:F5}", h.Latitude, h.Longitude);
+                row.AddView(_ui.Text(coords, 15, p.Text), Ui.Gap(_ui.Dp(4)));
+                string meta = $"{h.Frames} frame{(h.Frames == 1 ? "" : "s")} · {(h.Calibrated ? "calibrated" : "not calibrated")}";
+                if (h.Warnings > 0) meta += $" · {h.Warnings} warning{(h.Warnings == 1 ? "" : "s")}";
+                row.AddView(_ui.Text(meta, 13, h.Warnings > 0 || !h.Calibrated ? p.Warn : p.TextDim), Ui.Gap(_ui.Dp(2)));
+
+                row.ContentDescription = $"{local:f}, {coords}, plus or minus {acc} kilometres. Opens the map.";
+                HistoryEntry entry = h;
+                row.Click += (s, e) => OpenMapAt(entry.Latitude, entry.Longitude, "Star fix " + local.ToString("yyyy-MM-dd HH:mm", Inv));
+                row.LongClick += (s, e) => Confirm("Delete this fix?", $"{local:f}\n{coords}", "Delete", () =>
+                {
+                    Storage.DeleteHistory(this, entry);
+                    RefreshHistory();
+                });
+                _historyList.AddView(row, Ui.Gap(_ui.Dp(10)));
+            }
+        }
+
+        private void ShowHistory()
+        {
+            if (_busy) return;
+            _historyVisible = true;
+            SetBackHandler(true);
+            RefreshHistory();
+            _mainScreen.Visibility = ViewStates.Gone;
+            _advancedScreen.Visibility = ViewStates.Gone;
+            _historyScreen.Visibility = ViewStates.Visible;
+            _historyScreen.ScrollTo(0, 0);
+        }
+
         private void ShowMain()
         {
+            _historyVisible = false;
+            _historyScreen.Visibility = ViewStates.Gone;
             if (_advancedVisible)
             {
                 CommitCaptureFields();

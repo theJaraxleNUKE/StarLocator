@@ -44,7 +44,7 @@ Each release also has a `.sha256` file for checking the download.
 
 ## Using the app
 
-The main screen has one big round button, the result, and a calibration badge. Everything else is under **Advanced**. There is no camera preview: in the mount the screen faces down, so the app signals with beeps instead.
+The main screen has one big round button, the result, a calibration badge, and two buttons at the top: **History** and **Advanced**. There is no camera preview: in the mount the screen faces down, so the app signals with beeps instead.
 
 1. **Go outside on a clear night.** Avoid the Moon and bright lights.
 2. Tap **Locate**. During the countdown (10 s by default) the app beeps once a second. Put the phone **screen-down** in the [60° mount](#3d-printed-60-mount), or on a rock or car roof, so the back camera points **45–90° up** at clear sky.
@@ -52,6 +52,10 @@ The main screen has one big round button, the result, and a calibration badge. E
 4. The card shows the fix in degrees-minutes-seconds and decimal degrees, an estimated 1-σ error in km, and how many frames were used. **Open map** passes the fix to any installed map app as a `geo:` link (offline map apps work). **Copy** copies the decimal coordinates. Warnings show under the fix, e.g. "not calibrated", "phone was 4° off the calibration pose" or "camera image shifted 0.3° inside the phone" (see [image stability](#image-stability)).
 
 By default the app takes 4 frames at ¼×, ½×, 1× and 2× the set exposure (4 s at ISO 1600 → 1, 2, 4 and 8 s, clamped to what the camera supports). Each frame is solved on its own. Failed frames are skipped, outliers (for example a frame where the phone was bumped) are rejected, and the rest are combined into one fix.
+
+### History
+
+**History** lists every fix the app has produced, newest first: date and time, coordinates, the ± error, how many frames were used, and whether it was calibrated or had warnings. Tap an entry to open it in your map app; touch and hold to delete it; **Clear** removes them all. The list is kept in the app's private storage on the phone (up to 1,000 fixes) and is never sent anywhere.
 
 ### Advanced
 

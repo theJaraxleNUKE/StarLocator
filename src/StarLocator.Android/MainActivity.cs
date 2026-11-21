@@ -75,12 +75,14 @@ namespace StarLocator.Droid
             _locatorTask = Task.Run(() => new CelestialLocator());
             RefreshAll();
             if (savedInstanceState?.GetBoolean("advanced") == true) ShowAdvanced(false);
+            else if (savedInstanceState?.GetBoolean("history") == true) ShowHistory();
         }
 
         protected override void OnSaveInstanceState(Bundle outState)
         {
             base.OnSaveInstanceState(outState);
             outState.PutBoolean("advanced", _advancedVisible);
+            outState.PutBoolean("history", _historyVisible);
         }
 
         protected override void OnResume()
@@ -110,7 +112,7 @@ namespace StarLocator.Droid
 #pragma warning disable CS0618, CS0672, CA1422 // OnBackPressed is deprecated on API 33+ but still delivered.
         public override void OnBackPressed()
         {
-            if (_advancedVisible) ShowMain();
+            if (_advancedVisible || _historyVisible) ShowMain();
             else base.OnBackPressed();
         }
 #pragma warning restore CS0618, CS0672, CA1422
@@ -277,6 +279,16 @@ namespace StarLocator.Droid
                                          "this fix is unreliable (try another camera in Advanced)");
                         Session.LastFix = combined;
                         Session.LastFixLocal = DateTime.Now;
+                        try
+                        {
+                            Storage.AddHistory(this, new HistoryEntry
+                            {
+                                Utc = DateTime.UtcNow, Latitude = combined.LatitudeDeg, Longitude = combined.LongitudeDeg,
+                                UncertaintyKm = combined.UncertaintyKm, Frames = combined.FramesUsed,
+                                Calibrated = _calibration != null, Warnings = warnings.Count
+                            });
+                        }
+                        catch (System.IO.IOException) { /* history is a convenience; the fix itself is shown regardless */ }
                         title = "Fix";
                         ShowFix(combined, o.Frames, warnings);
                         o.Report.Append('\n').Append(combineMsg).Append('\n');
@@ -604,8 +616,15 @@ namespace StarLocator.Droid
         {
             PositionFix? f = Session.LastFix;
             if (f == null) return;
-            string lat = f.LatitudeDeg.ToString("F5", Inv), lon = f.LongitudeDeg.ToString("F5", Inv);
-            try { StartActivity(new Intent(Intent.ActionView, Android.Net.Uri.Parse($"geo:{lat},{lon}?q={lat},{lon}(Star fix)"))); }
+            OpenMapAt(f.LatitudeDeg, f.LongitudeDeg, "Star fix");
+        }
+
+        /// <summary>Hands a position to any installed map app (geo: link; offline map apps work).</summary>
+        private void OpenMapAt(double latitude, double longitude, string label)
+        {
+            string lat = latitude.ToString("F5", Inv), lon = longitude.ToString("F5", Inv);
+            string q = Android.Net.Uri.Encode($"{lat},{lon}({label})") ?? $"{lat},{lon}";
+            try { StartActivity(new Intent(Intent.ActionView, Android.Net.Uri.Parse($"geo:{lat},{lon}?q={q}"))); }
             catch (ActivityNotFoundException) { Toast.MakeText(this, "No map app installed.", ToastLength.Short)?.Show(); }
         }
 
