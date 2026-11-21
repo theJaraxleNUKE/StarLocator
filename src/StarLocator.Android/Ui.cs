@@ -14,13 +14,16 @@ namespace StarLocator.Droid
     internal sealed class Palette
     {
         public Color Bg, Surface, Surface2, Primary, OnPrimary, Accent, Text, TextDim, Ok, Warn, Error;
+        /// <summary>Locate button: disc gradient, star glow and faint background dots.</summary>
+        public Color DiscInner, DiscOuter, Glow, Dots;
 
         public static Palette Night => new Palette
         {
             Bg = Color.Rgb(10, 15, 28), Surface = Color.Rgb(21, 28, 46), Surface2 = Color.Rgb(31, 40, 64),
             Primary = Color.Rgb(255, 210, 122), OnPrimary = Color.Rgb(26, 20, 6), Accent = Color.Rgb(143, 180, 255),
             Text = Color.Rgb(236, 240, 250), TextDim = Color.Rgb(163, 174, 201),
-            Ok = Color.Rgb(127, 217, 154), Warn = Color.Rgb(255, 184, 107), Error = Color.Rgb(255, 138, 128)
+            Ok = Color.Rgb(127, 217, 154), Warn = Color.Rgb(255, 184, 107), Error = Color.Rgb(255, 138, 128),
+            DiscInner = Color.Rgb(27, 47, 99), DiscOuter = Color.Rgb(6, 11, 31), Glow = Color.Rgb(255, 231, 168), Dots = Color.Rgb(207, 224, 255)
         };
 
         public static Palette Red => new Palette
@@ -28,7 +31,8 @@ namespace StarLocator.Droid
             Bg = Color.Rgb(10, 0, 0), Surface = Color.Rgb(26, 5, 5), Surface2 = Color.Rgb(40, 9, 9),
             Primary = Color.Rgb(255, 90, 80), OnPrimary = Color.Rgb(20, 0, 0), Accent = Color.Rgb(255, 122, 110),
             Text = Color.Rgb(255, 138, 128), TextDim = Color.Rgb(186, 90, 84),
-            Ok = Color.Rgb(255, 122, 110), Warn = Color.Rgb(255, 160, 120), Error = Color.Rgb(255, 90, 80)
+            Ok = Color.Rgb(255, 122, 110), Warn = Color.Rgb(255, 160, 120), Error = Color.Rgb(255, 90, 80),
+            DiscInner = Color.Rgb(52, 10, 10), DiscOuter = Color.Rgb(12, 0, 0), Glow = Color.Rgb(255, 140, 120), Dots = Color.Rgb(186, 90, 84)
         };
     }
 

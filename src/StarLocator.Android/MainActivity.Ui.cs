@@ -161,9 +161,9 @@ namespace StarLocator.Droid
             // The big button
             float density = Resources?.DisplayMetrics?.Density ?? 2f;
             int widthDp = (int)((Resources?.DisplayMetrics?.WidthPixels ?? 1080) / density);
-            int ringPx = _ui.Dp(Math.Clamp(widthDp - 120, 180, 280));
+            int ringPx = _ui.Dp(Math.Clamp(widthDp - 80, 220, 320));
             _ring = new RingButton(this);
-            _ring.SetColors(p.Surface, p.Surface2, p.Primary, p.Text, p.TextDim);
+            _ring.SetColors(p.DiscInner, p.DiscOuter, p.Accent, p.Primary, p.Glow, p.Dots, p.Text, p.TextDim);
             _ring.Click += (s, e) => OnRingTapped();
             var ringLp = new LinearLayout.LayoutParams(ringPx, ringPx) { Gravity = GravityFlags.CenterHorizontal };
             col.AddView(_ring, ringLp);
@@ -449,7 +449,7 @@ namespace StarLocator.Droid
             Palette p = _ui.P;
             if (!_busy)
             {
-                _ring.Show("Locate", "tap to start", 0);
+                _ring.Show("Locate", "tap to start", 0, active: false);
                 _hint.Text = _delayS > 0
                     ? $"Tap, then place the phone screen-down in the mount within {_delayS} s."
                     : "Place the phone in the mount, then tap.";
