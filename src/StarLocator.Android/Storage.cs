@@ -45,6 +45,8 @@ namespace StarLocator.Droid
                 ["err"] = R(cal.ErrorBeforeKm),
                 ["spread"] = R(cal.SpreadDeg),
                 ["offered"] = cal.ShotsOffered.ToString(Inv),
+                ["fs"] = R(cal.FocalScale),
+                ["set"] = cal.CaptureSettings.Replace(";", ",").Replace("=", "-"),
                 ["method"] = cal.Method.Replace(";", ",").Replace("=", "-")
             };
             var sb = new StringBuilder();
@@ -95,6 +97,8 @@ namespace StarLocator.Droid
                     ErrorBeforeKm = D("err"),
                     SpreadDeg = kv.ContainsKey("spread") ? D("spread") : double.NaN,
                     ShotsOffered = kv.ContainsKey("offered") ? int.Parse(kv["offered"], Inv) : 0,
+                    FocalScale = kv.ContainsKey("fs") ? D("fs") : double.NaN,
+                    CaptureSettings = kv.TryGetValue("set", out string? set) ? set : "",
                     Method = kv["method"]
                 };
             }

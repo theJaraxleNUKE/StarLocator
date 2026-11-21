@@ -482,6 +482,7 @@ namespace StarLocator.Droid
             sb.Append(c.PoseSpecific ? "\nValid in the mount it was made in." : "\nValid in any pose.");
             if (!double.IsNaN(c.ErrorBeforeKm)) sb.Append($"\nError it corrected: {c.ErrorBeforeKm.ToString("F1", Inv)} km");
             if (!double.IsNaN(c.TemperatureC)) sb.Append($" · phone at {c.TemperatureC.ToString("F0", Inv)} °C");
+            if (c.CaptureSettings.Length > 0) sb.Append($"\nCaptured at {c.CaptureSettings}");
             if (!double.IsNaN(c.SpreadDeg))
                 sb.Append($"\nFrames agreed within {c.SpreadDeg.ToString("F3", Inv)}° ({c.Shots} of {Math.Max(c.ShotsOffered, c.Shots)} used)");
             _calStatus.Text = sb.ToString();

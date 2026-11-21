@@ -11,6 +11,8 @@ namespace StarLocator.Core
         public double Flux { get; init; }
         public int Area { get; init; }
         public int Peak { get; init; }
+        /// <summary>Ratio of the blob's long to short axis (flux-weighted second moments); 1 = round.</summary>
+        public double Elongation { get; init; } = 1.0;
     }
 
     public sealed class DetectorOptions
@@ -27,6 +29,12 @@ namespace StarLocator.Core
         public int MaxArea { get; set; } = 0;
         /// <summary>Pixels this close to the border are ignored.</summary>
         public int BorderMargin { get; set; } = 4;
+        /// <summary>
+        /// Blobs longer than this ratio (long/short axis) are rejected: lit tree branches, wires and
+        /// aircraft trails, which otherwise crowd real stars out of the brightest-N list. Stars are
+        /// round, or slightly drawn out by sky rotation in long exposures. 0 = keep all.
+        /// </summary>
+        public double MaxElongation { get; set; } = 3.5;
         /// <summary>Only the brightest N blobs are returned.</summary>
         public int MaxStars { get; set; } = 80;
     }
@@ -89,7 +97,7 @@ namespace StarLocator.Core
                     if (luma[row + x] <= thr[brow + x / bs]) continue;
 
                     // Flood fill this component.
-                    double sumW = 0, sumX = 0, sumY = 0;
+                    double sumW = 0, sumX = 0, sumY = 0, sumXX = 0, sumYY = 0, sumXY = 0;
                     int area = 0, peak = 0;
                     bool touchesBorder = false;
                     visited[idx] = true;
@@ -104,6 +112,7 @@ namespace StarLocator.Core
                         if (w > 0)
                         {
                             sumW += w; sumX += w * px; sumY += w * py;
+                            sumXX += w * px * px; sumYY += w * py * py; sumXY += w * px * py;
                         }
                         area++;
                         if (val > peak) peak = val;
@@ -128,13 +137,22 @@ namespace StarLocator.Core
                     }
 
                     if (area < o.MinArea || area > maxArea || touchesBorder || sumW <= 0) continue;
+                    double cu = sumX / sumW, cv = sumY / sumW;
+                    // Covariance of the blob (+1/12 px² for pixel size) -> axis ratio.
+                    double vxx = sumXX / sumW - cu * cu + 1.0 / 12, vyy = sumYY / sumW - cv * cv + 1.0 / 12, vxy = sumXY / sumW - cu * cv;
+                    double tr = vxx + vyy, det = vxx * vyy - vxy * vxy;
+                    double disc = Math.Sqrt(Math.Max(0, tr * tr / 4 - det));
+                    double l1 = tr / 2 + disc, l2 = Math.Max(tr / 2 - disc, 1e-6);
+                    double elong = Math.Sqrt(Math.Max(1.0, l1 / l2));
+                    if (o.MaxElongation > 0 && elong > o.MaxElongation) continue;
                     found.Add(new DetectedStar
                     {
-                        U = sumX / sumW,
-                        V = sumY / sumW,
+                        U = cu,
+                        V = cv,
                         Flux = sumW,
                         Area = area,
-                        Peak = peak
+                        Peak = peak,
+                        Elongation = elong
                     });
                 }
             }

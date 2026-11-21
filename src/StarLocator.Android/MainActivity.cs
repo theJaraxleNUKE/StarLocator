@@ -181,6 +181,8 @@ namespace StarLocator.Droid
             public int Frames { get; set; }
             /// <summary>Largest disagreement (degrees) between the frames' zenith directions; see PositionSolver.ZenithSpread.</summary>
             public double StabilityMaxDeg { get; set; }
+            /// <summary>Median effective focal-length scale of the well-identified frames (NaN if none).</summary>
+            public double FocalScale { get; set; } = double.NaN;
         }
 
         private void OnRingTapped()
@@ -229,6 +231,8 @@ namespace StarLocator.Droid
                     SensorCalibration? cal = PositionSolver.CalibrateAtKnownLocation(o.Shots, calLat, calLon, method, temp, out string msg);
                     if (cal != null)
                     {
+                        cal.FocalScale = o.FocalScale;
+                        cal.CaptureSettings = CaptureSettingsKey();
                         _calibration = cal;
                         Storage.SaveCalibration(this, _camera.CameraId, cal);
                         title = "Calibration saved";
@@ -257,6 +261,12 @@ namespace StarLocator.Droid
                             double t = ReadTemperatureC();
                             if (!double.IsNaN(t) && !double.IsNaN(_calibration.TemperatureC) && Math.Abs(t - _calibration.TemperatureC) >= 10)
                                 warnings.Add($"Phone is {t:F0} °C, calibrated at {_calibration.TemperatureC:F0} °C");
+                            if (!double.IsNaN(_calibration.FocalScale) && !double.IsNaN(o.FocalScale)
+                                && Math.Abs(o.FocalScale / _calibration.FocalScale - 1) > PositionSolver.FocalChangeWarn)
+                                warnings.Add($"Lens focus differs from the calibration ({(o.FocalScale / _calibration.FocalScale - 1) * 100:+0.0;-0.0}% focal length): " +
+                                             "expect several km extra error");
+                            if (_calibration.CaptureSettings.Length > 0 && _calibration.CaptureSettings != CaptureSettingsKey())
+                                warnings.Add($"Capture settings differ from the calibration ({_calibration.CaptureSettings})");
                         }
                         else
                         {
@@ -425,11 +435,14 @@ namespace StarLocator.Droid
             }
 
             // ---- Remember the lens focal-length correction the stars revealed ---------------
+            // Two or more agreeing frames are required: one degraded frame must not overwrite it.
             if (learned.Count > 0)
             {
                 learned.Sort();
                 double median = learned[learned.Count / 2];
-                if (Math.Abs(median / fscale - 1) > 0.002)
+                o.FocalScale = median;
+                o.Report.Append(string.Format(Inv, "Lens focal-length scale this capture: ×{0:F4}\n", median));
+                if (learned.Count >= 2 && Math.Abs(median / fscale - 1) > 0.002)
                 {
                     Storage.SaveFocalScale(this, camId, median);
                     o.Report.Append($"Lens correction learned: focal length ×{median:F4} (saved for this camera)\n");
@@ -605,6 +618,10 @@ namespace StarLocator.Droid
             if (cm != null) cm.PrimaryClip = ClipData.NewPlainText("Star fix", text);
             Toast.MakeText(this, "Coordinates copied", ToastLength.Short)?.Show();
         }
+
+        /// <summary>The capture settings a calibration is tied to.</summary>
+        private string CaptureSettingsKey() =>
+            string.Format(Inv, "{0:0.###} s, ISO {1}, {2}", _exposureS, _iso, _bracket ? "bracket" : "single frame");
 
         private string AppVersion()
         {

@@ -99,7 +99,7 @@ The star tracker comes from **Marbel, Ben-Moshe & Yozevitch, "Star-Tracker Algor
 
 | # | Step | File |
 |---|---|---|
-| 1 | **Star detection.** Per-block background and robust noise estimate, threshold, 8-connected components, background-subtracted sub-pixel centroids. Blobs that are too small (hot pixels) or too large (Moon, lamps) are rejected. | `StarDetector.cs` |
+| 1 | **Star detection.** Per-block background and robust noise estimate, threshold, 8-connected components, background-subtracted sub-pixel centroids. Blobs that are too small (hot pixels), too large (Moon, lamps) or elongated more than 3.5 : 1 (lit branches, wires, aircraft trails) are rejected. | `StarDetector.cs` |
 | 2 | **Star Pattern Hash Table** (paper §3.1). Every triplet of catalog stars brighter than magnitude 4.0 whose sides are 1–30° is keyed by its three sorted, quantised angular distances. That is 518 stars and 94,439 triangles, built at start-up in about 0.05 s on a desktop CPU. | `StarPatternHash.cs` |
 | 3 | **Matching + confidence voting** (paper §3.2). Triangles from the 24 brightest detections are looked up with a ±0.4° tolerance. Each catalog match votes for a star label, weighted by 1/(number of matches), so ambiguous triangles count less. | `StarIdentifier.cs` |
 | 4 | **Validation** (paper §3.3). Pairs of voted labels give exact orientation hypotheses (TRIAD). A hypothesis is accepted only if **at least 4 independently voted labels agree** with it, the matched-star count beats chance by more than 5σ, and the fit RMS is under half the match tolerance (chance matches spread over the whole tolerance disc). A solution found by the wide focal-length sweep must match twice as many stars. | `StarIdentifier.cs` |
@@ -145,7 +145,22 @@ Same phone and place, version 1.0.6, phone in the 60° mount on a clear night: 8
 | Calibrate on one capture, test on another | **5–280 km**; on the same capture 1–3 km |
 | Camera image vs phone body | **the image moved inside the phone**: up to 0.65° of tilt within a 22 s capture while the accelerometer moved < 0.01°; Polaris shifted 56 px (0.94°). When the phone really moved (bumped, or turned 25° in the mount) camera and accelerometer agreed |
 
-Diagnosis: the "up" error was not a fixed property of the phone but changed from capture to capture (0.17–1.8°) and drifted with exposure length. This matches the camera's optical image stabilisation, which the Camera2 still-capture template leaves on and 1.0.6 did not switch off. It may also be another kind of image stabilisation or processing on that phone. 1.0.7 switches all stabilisation off, logs the lens-shift data where Android provides it, warns about unsteady captures, refuses unsteady calibrations and lets you choose another back camera (ultra-wide lenses usually have no OIS). Whether this cures it on that phone has **not been tested yet**.
+Diagnosis: the "up" error was not a fixed property of the phone but changed from capture to capture (0.17–1.8°) and drifted with exposure length. This matches the camera's optical image stabilisation, which the Camera2 still-capture template leaves on and 1.0.6 did not switch off. It may also be another kind of image stabilisation or processing on that phone. 1.0.7 switches all stabilisation off, logs the lens-shift data where Android provides it, warns about unsteady captures, refuses unsteady calibrations and lets you choose another back camera (ultra-wide lenses usually have no OIS). Field test 3 confirmed the cure.
+
+### Field test 3 (same phone, home driveway, version 1.0.8)
+
+Phone in the 60° mount on a slightly sloping driveway (camera at 57.4–57.8°), stabilisation off, GPS calibration on the spot. 4 captures, 16 frames, trees in the lower part of the view.
+
+| | Result |
+|---|---|
+| Stabilisation | off in every frame; reported OIS lens shift < 1 px |
+| Image steadiness within a capture | 0.02–0.055° (field test 2: up to 0.65°). The remaining 0.04–0.05° is a repeatable jump of ~4 px after the second frame of every bracket |
+| Calibrate on one good capture, test on another (the 3 good captures) | **0.9–4 km** |
+| App fix right after calibrating (22:48) | **1.3 km** from the GPS calibration point |
+| Fix made with an earlier calibration (22:46) | 15.5 km off: that calibration's frames were not kept, so the cause can't be traced |
+| Last capture (22:49) | 3 of 4 frames rejected because lit tree branches crowded out the stars; fixed in 1.0.9 (elongated blobs are now ignored: all 4 frames solve). Its lens focal-length scale had also changed by 0.7%, and its fix was 7–10 km from the others |
+
+So with stabilisation off, the method reaches **a few km** on this phone, as long as the lens is in the same state as during calibration. 1.0.9 records the lens scale with the calibration and warns when a capture's lens scale differs by more than 0.3%, or when the exposure/ISO/bracket differ from the calibration capture.
 
 ### Simulator
 
@@ -190,6 +205,7 @@ Rules of thumb:
 ## Limitations
 
 <a id="image-stability"></a>
+- Phone camera lenses are not perfectly repeatable: a small change in the lens position shows up as a change in focal-length scale together with a shift of the image, worth several km. The app warns when the lens scale differs from the calibration capture.
 - **The camera image must be rigidly fixed to the phone body**, to about 0.01°. Optical image stabilisation, sensor-shift stabilisation or image warping in the camera software break this: 0.1° of image shift is ≈11 km of error. The app switches what it can off and warns when frames disagree, but some phones may not let apps turn stabilisation off.
 - Works at night only, and needs about 6+ identifiable stars: clear sky, nothing blocking the view.
 - Needs manual exposure (`MANUAL_SENSOR`) on the back camera.

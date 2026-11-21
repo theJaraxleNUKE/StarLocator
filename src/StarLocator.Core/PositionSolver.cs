@@ -62,6 +62,14 @@ namespace StarLocator.Core
         public double SpreadDeg { get; init; } = double.NaN;
         /// <summary>Frames used / frames offered.</summary>
         public int ShotsOffered { get; init; }
+        /// <summary>
+        /// Effective focal-length scale of the calibration frames (set by the app). A later capture whose
+        /// lens scale differs noticeably was taken with the lens elements in a different position,
+        /// which also moves the image centre, so the stored correction may not fit (field test 3).
+        /// </summary>
+        public double FocalScale { get; set; } = double.NaN;
+        /// <summary>Exposure / ISO / bracket used for the calibration (set by the app).</summary>
+        public string CaptureSettings { get; set; } = "";
 
         /// <summary>Angle (degrees) between the current gravity direction and the calibration pose.</summary>
         public double PoseDifferenceDeg(Vec3 accel) =>
@@ -123,8 +131,14 @@ namespace StarLocator.Core
         /// not a stable property of the phone (0.1° of tilt ≈ 11 km).
         /// </summary>
         public const double MaxCalibrationSpreadDeg = 0.1;
-        /// <summary>Frames of one capture whose zeniths disagree by more than this trigger a stability warning.</summary>
-        public const double StabilityWarnDeg = 0.05;
+        /// <summary>
+        /// Frames of one capture whose zeniths disagree by more than this trigger a stability warning.
+        /// Field test 3 (stabilisation off) showed a repeatable 0.04–0.055° pattern within every bracket;
+        /// field test 2 (stabilisation on) showed 0.1–0.65°.
+        /// </summary>
+        public const double StabilityWarnDeg = 0.08;
+        /// <summary>Relative focal-length change from the calibration capture that triggers a warning.</summary>
+        public const double FocalChangeWarn = 0.003;
         /// <summary>A frame whose "up" error exceeds this is treated as a misidentification and never used for calibration.</summary>
         public const double GrossTiltErrorDeg = 5.0;
 

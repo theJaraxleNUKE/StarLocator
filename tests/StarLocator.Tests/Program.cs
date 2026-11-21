@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
@@ -21,6 +22,7 @@ namespace StarLocator.Tests
             TestWahba();
             TestCamera();
             TestCoordinateParser();
+            TestDetectorRejectsStreaks();
 
             var sw = Stopwatch.StartNew();
             var locator = new CelestialLocator();
@@ -421,6 +423,39 @@ namespace StarLocator.Tests
             SensorCalibration? ok = PositionSolver.CalibrateAtKnownLocation(oneBad, lat, lon, "test", double.NaN, out string msgOk);
             Console.WriteLine("    " + msgOk);
             Check(ok != null && ok.Shots == oneBad.Count - 1 && ok.SpreadDeg < 0.05, "One jumped frame is rejected; calibration from the rest");
+        }
+
+        /// <summary>
+        /// Field test 3: lit tree branches crowded real stars out of the brightest-80 list and made
+        /// three frames fail. Elongated blobs must be rejected while round stars are kept.
+        /// </summary>
+        private static void TestDetectorRejectsStreaks()
+        {
+            const int w = 400, h = 300;
+            var img = new byte[w * h];
+            var rnd = new Random(5);
+            for (int i = 0; i < img.Length; i++) img[i] = (byte)(20 + rnd.Next(0, 4));
+            void Blob(double cx, double cy, double sx, double sy, double angle, double peak)
+            {
+                double c = Math.Cos(angle), s = Math.Sin(angle);
+                for (int y = 0; y < h; y++)
+                    for (int x = 0; x < w; x++)
+                    {
+                        double dx = x - cx, dy = y - cy;
+                        double u = (c * dx + s * dy) / sx, v = (-s * dx + c * dy) / sy;
+                        double val = peak * Math.Exp(-0.5 * (u * u + v * v));
+                        if (val > 1) img[y * w + x] = (byte)Math.Min(255, img[y * w + x] + val);
+                    }
+            }
+            Blob(100, 100, 1.4, 1.4, 0, 200);          // star
+            Blob(300, 80, 1.6, 1.3, 0.3, 150);         // star, slightly trailed
+            Blob(200, 200, 9.0, 1.2, 0.7, 220);        // lit branch
+            Blob(80, 240, 14.0, 1.0, -0.4, 250);       // wire / plane trail
+            List<DetectedStar> det = StarDetector.Detect(img, w, h, w);
+            bool starsKept = det.Count(d => Math.Abs(d.U - 100) < 2 && Math.Abs(d.V - 100) < 2) == 1
+                          && det.Count(d => Math.Abs(d.U - 300) < 2 && Math.Abs(d.V - 80) < 2) == 1;
+            bool streaksGone = det.All(d => Math.Abs(d.U - 200) > 15 && Math.Abs(d.U - 80) > 20);
+            Check(starsKept && streaksGone, $"Detector keeps round stars and drops elongated blobs ({det.Count} kept)");
         }
 
         private static void TestReplay(CelestialLocator loc)
