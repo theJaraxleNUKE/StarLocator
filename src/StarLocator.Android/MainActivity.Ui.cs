@@ -33,6 +33,7 @@ namespace StarLocator.Droid
         private Button _gpsBtn = null!, _calibrateBtn = null!, _forgetBtn = null!;
         private Button _exportLastBtn = null!, _exportKeptBtn = null!, _deleteKeptBtn = null!, _resetLensBtn = null!;
         private Switch _bracketSwitch = null!, _keepSwitch = null!, _redSwitch = null!;
+        private TextView _cameraDesc = null!;
         private View _calibrationSection = null!;
         private Java.Lang.Object? _backCallback;
 
@@ -214,6 +215,27 @@ namespace StarLocator.Droid
 
             // Capture settings
             LinearLayout cap = Section(col, "Capture");
+            List<BackCamera> cams;
+            try { cams = CameraCapture.ListBackCameras(this); }
+            catch (Exception) { cams = new List<BackCamera>(); }
+            if (cams.Count > 5) cams = cams.GetRange(0, 5);
+            if (cams.Count > 1)
+            {
+                var labels = new string[cams.Count];
+                for (int i = 0; i < cams.Count; i++)
+                {
+                    labels[i] = cams[i].Label;
+                    for (int j = 0; j < cams.Count; j++)
+                        if (j != i && cams[j].Label == cams[i].Label) { labels[i] = cams[i].Label + " #" + cams[i].Id; break; }
+                }
+                string current = _camera?.CameraId ?? Storage.GetSetting(this, "camera", cams[0].Id);
+                int sel = Math.Max(0, cams.FindIndex(c => c.Id == current));
+                cap.AddView(_ui.Labeled("Camera", _ui.Segmented(labels, sel, i => SelectCamera(cams[i].Id))));
+            }
+            _cameraDesc = _ui.Text("", 13, p.TextDim);
+            cap.AddView(_cameraDesc, Ui.Gap(_ui.Dp(8)));
+            var spacer = new View(this);
+            cap.AddView(spacer, new LinearLayout.LayoutParams(1, _ui.Dp(8)));
             cap.AddView(_ui.Labeled("Countdown", _ui.Segmented(new[] { "Off", "5 s", "10 s" },
                 _delayS == 0 ? 0 : _delayS == 5 ? 1 : 2,
                 i => { _delayS = i == 0 ? 0 : i == 1 ? 5 : 10; SaveSetting("delay", _delayS.ToString(Inv)); })));
@@ -460,6 +482,8 @@ namespace StarLocator.Droid
             sb.Append(c.PoseSpecific ? "\nValid in the mount it was made in." : "\nValid in any pose.");
             if (!double.IsNaN(c.ErrorBeforeKm)) sb.Append($"\nError it corrected: {c.ErrorBeforeKm.ToString("F1", Inv)} km");
             if (!double.IsNaN(c.TemperatureC)) sb.Append($" · phone at {c.TemperatureC.ToString("F0", Inv)} °C");
+            if (!double.IsNaN(c.SpreadDeg))
+                sb.Append($"\nFrames agreed within {c.SpreadDeg.ToString("F3", Inv)}° ({c.Shots} of {Math.Max(c.ShotsOffered, c.Shots)} used)");
             _calStatus.Text = sb.ToString();
         }
 
@@ -495,14 +519,19 @@ namespace StarLocator.Droid
                 if (_camera.CaptureSize != null) sb.Append($" · {_camera.CaptureSize.Width}×{_camera.CaptureSize.Height}");
                 sb.Append($"\nExposure {info.MinExposureNs / 1e9:0.####}–{info.MaxExposureNs / 1e9:0.##} s · ISO {info.MinIso}–{info.MaxIso}");
                 sb.Append($"\nManual sensor: {(info.ManualSensor ? "yes" : "no")} · timestamps: {(info.RealtimeTimestamps ? "realtime" : "unknown base")}");
+                sb.Append($"\nOptical stabilisation: {(info.HasOis ? "present, switched off for captures" : "none")}" +
+                          $" · OIS shift data: {(info.OisDataAvailable ? "yes" : "no")}");
+                if (info.LogicalMultiCamera) sb.Append($"\nMulti-camera: lenses {string.Join(", ", info.PhysicalCameraIds)}");
                 double fscale = Storage.LoadFocalScale(this, _camera.CameraId);
                 sb.Append($"\nLens correction: focal length ×{fscale.ToString("F4", Inv)}");
                 _resetLensBtn.Visibility = Math.Abs(fscale - 1) > 1e-9 ? ViewStates.Visible : ViewStates.Gone;
+                _cameraDesc.Text = $"Camera {_camera.CameraId}: {info.Describe()}";
             }
             else
             {
                 sb.Append("Camera not open.");
                 _resetLensBtn.Visibility = ViewStates.Gone;
+                _cameraDesc.Text = "";
             }
             sb.Append($"\nAccelerometer: {(_gravity?.Available == true ? "yes" : "missing")}");
             if (!string.IsNullOrEmpty(_cameraNote)) sb.Append('\n').Append(_cameraNote);

@@ -15,6 +15,12 @@ namespace StarLocator.Droid
         public const int TimestampSourceRealtime = 1;        // SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME
         public const int DistortionCorrectionFast = 1;       // DISTORTION_CORRECTION_MODE_FAST
         public const int DistortionCorrectionHighQuality = 2;// DISTORTION_CORRECTION_MODE_HIGH_QUALITY
+        public const int CapabilityLogicalMultiCamera = 11;  // REQUEST_AVAILABLE_CAPABILITIES_LOGICAL_MULTI_CAMERA
+        public const int OisOff = 0, OisOn = 1;              // LENS_OPTICAL_STABILIZATION_MODE_*
+        public const int VideoStabOff = 0;                   // CONTROL_VIDEO_STABILIZATION_MODE_OFF
+        public const int NoiseReductionOff = 0, NoiseReductionFast = 1;
+        public const int EdgeOff = 0;
+        public const int OisDataOn = 1;                      // STATISTICS_OIS_DATA_MODE_ON
 
         public int SensorOrientation { get; private set; } = 90;
         public bool ManualSensor { get; private set; }
@@ -26,6 +32,30 @@ namespace StarLocator.Droid
         public float MinFocusDistance { get; private set; }
         /// <summary>Best distortion-correction mode the camera offers (0 = none).</summary>
         public int DistortionCorrectionMode { get; private set; }
+
+        /// <summary>Optical image stabilisation modes the lens offers (LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION).</summary>
+        public int[] OisModes { get; private set; } = Array.Empty<int>();
+        public bool HasOis => Array.IndexOf(OisModes, OisOn) >= 0;
+        public int[] VideoStabilizationModes { get; private set; } = Array.Empty<int>();
+        public int[] NoiseReductionModes { get; private set; } = Array.Empty<int>();
+        public int[] EdgeModes { get; private set; } = Array.Empty<int>();
+        /// <summary>Android 12+: the camera can report the OIS lens shift for each frame.</summary>
+        public bool OisDataAvailable { get; private set; }
+        public bool LogicalMultiCamera { get; private set; }
+        public string[] PhysicalCameraIds { get; private set; } = Array.Empty<string>();
+        /// <summary>Lens focal length in mm (first listed), or NaN.</summary>
+        public double FocalLengthMm => _focalLengths != null && _focalLengths.Length > 0 ? _focalLengths[0] : double.NaN;
+
+        /// <summary>35 mm-equivalent focal length (diagonal rule), or NaN if the sensor size is unknown.</summary>
+        public double EquivalentFocalMm
+        {
+            get
+            {
+                if (double.IsNaN(FocalLengthMm) || _physicalSize == null || _physicalSize.Width <= 0) return double.NaN;
+                double diag = Math.Sqrt(_physicalSize.Width * _physicalSize.Width + _physicalSize.Height * _physicalSize.Height);
+                return FocalLengthMm * 43.27 / diag;
+            }
+        }
 
         private Rect? _active;
         private Rect? _preCorrection;
@@ -51,7 +81,26 @@ namespace StarLocator.Droid
             };
 
             int[]? caps = GetIntArray(c, CameraCharacteristics.RequestAvailableCapabilities);
-            if (caps != null) info.ManualSensor = Array.IndexOf(caps, CapabilityManualSensor) >= 0;
+            if (caps != null)
+            {
+                info.ManualSensor = Array.IndexOf(caps, CapabilityManualSensor) >= 0;
+                info.LogicalMultiCamera = Array.IndexOf(caps, CapabilityLogicalMultiCamera) >= 0;
+            }
+            info.OisModes = GetIntArray(c, CameraCharacteristics.LensInfoAvailableOpticalStabilization) ?? Array.Empty<int>();
+            info.VideoStabilizationModes = GetIntArray(c, CameraCharacteristics.ControlAvailableVideoStabilizationModes) ?? Array.Empty<int>();
+            info.NoiseReductionModes = GetIntArray(c, CameraCharacteristics.NoiseReductionAvailableNoiseReductionModes) ?? Array.Empty<int>();
+            info.EdgeModes = GetIntArray(c, CameraCharacteristics.EdgeAvailableEdgeModes) ?? Array.Empty<int>();
+            if (OperatingSystem.IsAndroidVersionAtLeast(31))
+            {
+                int[]? ois = GetIntArray(c, CameraCharacteristics.StatisticsInfoAvailableOisDataModes);
+                info.OisDataAvailable = ois != null && Array.IndexOf(ois, OisDataOn) >= 0;
+            }
+            if (OperatingSystem.IsAndroidVersionAtLeast(28) && info.LogicalMultiCamera)
+            {
+                var ids = new System.Collections.Generic.List<string>();
+                foreach (string id in c.PhysicalCameraIds) ids.Add(id);
+                info.PhysicalCameraIds = ids.ToArray();
+            }
 
             Android.Util.Range? exp = GetObj<Android.Util.Range>(c, CameraCharacteristics.SensorInfoExposureTimeRange);
             if (exp != null)
@@ -139,6 +188,18 @@ namespace StarLocator.Droid
                 source += " (distortion corrected by camera)";
             }
             return model;
+        }
+
+        /// <summary>One-line description for the camera picker and reports.</summary>
+        public string Describe()
+        {
+            var parts = new System.Collections.Generic.List<string>();
+            if (!double.IsNaN(EquivalentFocalMm)) parts.Add($"{EquivalentFocalMm:F0} mm equiv.");
+            else if (!double.IsNaN(FocalLengthMm)) parts.Add($"f {FocalLengthMm:F2} mm");
+            parts.Add(HasOis ? "has OIS (switched off for capture)" : "no OIS");
+            if (LogicalMultiCamera) parts.Add($"multi-camera ({PhysicalCameraIds.Length} lenses)");
+            if (!ManualSensor) parts.Add("no manual exposure");
+            return string.Join(" · ", parts);
         }
 
         // ---- Camera2 metadata helpers --------------------------------------------------------

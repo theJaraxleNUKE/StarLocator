@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace StarLocator.Core
 {
@@ -53,6 +54,14 @@ namespace StarLocator.Core
         public double TemperatureC { get; init; } = double.NaN;
         /// <summary>Uncalibrated error of the calibration capture itself, in km (known-location method only).</summary>
         public double ErrorBeforeKm { get; init; } = double.NaN;
+        /// <summary>
+        /// How much the calibration frames disagreed with each other (degrees, largest deviation from
+        /// their mean after outlier rejection). Large values mean the camera image was not steady
+        /// relative to the phone body. NaN for calibrations saved by older versions.
+        /// </summary>
+        public double SpreadDeg { get; init; } = double.NaN;
+        /// <summary>Frames used / frames offered.</summary>
+        public int ShotsOffered { get; init; }
 
         /// <summary>Angle (degrees) between the current gravity direction and the calibration pose.</summary>
         public double PoseDifferenceDeg(Vec3 accel) =>
@@ -109,6 +118,44 @@ namespace StarLocator.Core
         /// <summary>Typical uncorrected phone accelerometer tilt error assumed when no bias is known (degrees).</summary>
         public const double AssumedUncalibratedTiltErrorDeg = 0.5;
         public const double AssumedCalibratedTiltErrorDeg = 0.05;
+        /// <summary>
+        /// A calibration whose frames disagree by more than this is refused: the error it would store is
+        /// not a stable property of the phone (0.1° of tilt ≈ 11 km).
+        /// </summary>
+        public const double MaxCalibrationSpreadDeg = 0.1;
+        /// <summary>Frames of one capture whose zeniths disagree by more than this trigger a stability warning.</summary>
+        public const double StabilityWarnDeg = 0.05;
+        /// <summary>A frame whose "up" error exceeds this is treated as a misidentification and never used for calibration.</summary>
+        public const double GrossTiltErrorDeg = 5.0;
+
+        /// <summary>
+        /// Checks that the camera image stayed fixed to the phone body during one capture.
+        /// Each frame's zenith direction (Earth-fixed) is M^T·a: if the phone physically moves, the
+        /// camera attitude M and the accelerometer reading a change together and the zenith stays
+        /// put. If the image moves INSIDE the phone (optical image stabilisation, sensor shift,
+        /// software warping), M changes while a does not, and the zeniths spread apart.
+        /// Returns the RMS and the largest angle (degrees) of the frames' zeniths from their mean.
+        /// </summary>
+        public static (double RmsDeg, double MaxDeg) ZenithSpread(IReadOnlyList<Shot> shots)
+        {
+            if (shots.Count < 2) return (0, 0);
+            var z = new Vec3[shots.Count];
+            Vec3 sum = Vec3.Zero;
+            for (int i = 0; i < shots.Count; i++)
+            {
+                z[i] = (shots[i].EarthFixedToDevice.Transpose() * shots[i].Gravity.Mean).Normalized();
+                sum += z[i];
+            }
+            Vec3 c = sum.Normalized();
+            double ss = 0, max = 0;
+            foreach (Vec3 v in z)
+            {
+                double a = Vec3.Angle(v, c) * Astronomy.RadToDeg;
+                ss += a * a;
+                max = Math.Max(max, a);
+            }
+            return (Math.Sqrt(ss / shots.Count), max);
+        }
 
         public static Shot MakeShot(IdentificationResult id, GravityMeasurement g, DateTime utcMid)
         {
@@ -366,10 +413,27 @@ namespace StarLocator.Core
                 if (x != null && x[0] > 5 && x[0] < 15)
                 {
                     double gFit = x[0];
+                    var bFit = new Vec3(x[1], x[2], x[3]);
+                    var wp = new Vec3(x[4], x[5], x[6]);
+                    double worst = 0;
+                    foreach (Shot s in shots)
+                    {
+                        Vec3 u = s.EarthFixedToDevice * zTrue;
+                        Vec3 res = s.Gravity.Mean - (u * gFit + Vec3.Cross(u, wp) + bFit);
+                        worst = Math.Max(worst, Math.Atan2(res.Length, gFit) * Astronomy.RadToDeg);
+                    }
+                    if (worst > MaxCalibrationSpreadDeg)
+                    {
+                        message = $"Calibration refused: after fitting bias and misalignment the frames still disagree by up to {worst:F2}°. " +
+                                  "The camera image is not steady relative to the phone (stabilisation?). Try another camera in Advanced.";
+                        return null;
+                    }
                     var cal = new SensorCalibration
                     {
-                        AccelBias = new Vec3(x[1], x[2], x[3]),
-                        CameraMisalignment = new Vec3(x[4], x[5], x[6]) / gFit,
+                        AccelBias = bFit,
+                        CameraMisalignment = wp / gFit,
+                        SpreadDeg = worst,
+                        ShotsOffered = shots.Count,
                         Shots = shots.Count,
                         CreatedUtc = DateTime.UtcNow,
                         PoseSpecific = false,
@@ -384,23 +448,56 @@ namespace StarLocator.Core
                 }
             }
 
-            // Pose-specific: average tilt error of this pose.
-            Vec3 rSum = Vec3.Zero;
+            // Pose-specific: average tilt error of this pose, after rejecting frames that disagree.
+            var rs = new List<Vec3>();
+            int gross = 0;
             foreach (Shot s in shots)
             {
                 Vec3 a = s.Gravity.Mean;
                 Vec3 u = s.EarthFixedToDevice * zTrue;
-                rSum += a - u * a.Length;
+                Vec3 r = a - u * a.Length;
+                if (Math.Atan2(r.Length, a.Length) * Astronomy.RadToDeg > GrossTiltErrorDeg) { gross++; continue; }
+                rs.Add(r);
             }
-            Vec3 b = rSum / shots.Count;
+            if (rs.Count == 0)
+            {
+                message = $"Calibration refused: every frame's tilt error was over {GrossTiltErrorDeg:F0}°. " +
+                          "Check the coordinates (latitude first, west longitudes negative) and the phone's clock.";
+                return null;
+            }
+            var keep = new List<Vec3>(rs);
+            if (rs.Count >= 3)
+            {
+                var med = new Vec3(Median(rs.Select(v => v.X)), Median(rs.Select(v => v.Y)), Median(rs.Select(v => v.Z)));
+                double[] dev = rs.Select(v => (v - med).Length).ToArray();
+                double scale = 1.4826 * Median(dev);
+                double limit = Math.Max(3.0 * scale, g * MaxCalibrationSpreadDeg * Astronomy.DegToRad / 2);
+                keep = rs.Where(v => (v - med).Length <= limit).ToList();
+            }
+            Vec3 b = Vec3.Zero;
+            foreach (Vec3 r in keep) b += r;
+            b /= keep.Count;
+            double disagree = 0;
+            foreach (Vec3 r in keep) disagree = Math.Max(disagree, Math.Atan2((r - b).Length, g) * Astronomy.RadToDeg);
+            int dropped = shots.Count - keep.Count;
+            string droppedNote = dropped > 0 ? $" {dropped} of {shots.Count} frames rejected as inconsistent." : "";
+            if (disagree > MaxCalibrationSpreadDeg)
+            {
+                message = $"Calibration refused: the frames disagree by up to {disagree:F2}° (≈{disagree * Astronomy.DegToRad * Astronomy.EarthRadiusKm:F0} km)." +
+                          droppedNote + " The camera image is not steady relative to the phone (stabilisation?), so no fixed " +
+                          "correction exists. Try another camera in Advanced.";
+                return null;
+            }
             double tiltDeg = Math.Atan2(b.Length, g) * Astronomy.RadToDeg;
-            message = $"One-time calibration for this pose: tilt error {tiltDeg:F2}° removed. " +
-                      $"Uncalibrated this capture was {errBefore:F1} km off. Keep the phone in the same mount/pose.";
+            message = $"One-time calibration for this pose: tilt error {tiltDeg:F2}° removed (frames agree within {disagree:F3}°)." +
+                      droppedNote + $" Uncalibrated this capture was {errBefore:F1} km off. Keep the phone in the same mount/pose.";
             return new SensorCalibration
             {
+                SpreadDeg = disagree,
+                ShotsOffered = shots.Count,
                 AccelBias = b,
                 CameraMisalignment = Vec3.Zero,
-                Shots = shots.Count,
+                Shots = keep.Count,
                 CreatedUtc = DateTime.UtcNow,
                 PoseSpecific = true,
                 PoseUp = poseUp,
@@ -516,6 +613,13 @@ namespace StarLocator.Core
                 ShotCount = 1,
                 Notes = message + " " + first.Notes
             };
+        }
+
+        private static double Median(IEnumerable<double> values)
+        {
+            double[] a = values.ToArray();
+            Array.Sort(a);
+            return a.Length == 0 ? 0 : Median(a);
         }
 
         private static double Median(double[] sorted) =>

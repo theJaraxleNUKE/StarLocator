@@ -36,6 +36,17 @@ namespace StarLocator.Core
         public bool WideFocalSearch { get; set; } = true;
         public double WideFocalMin { get; set; } = 0.6;
         public double WideFocalMax { get; set; } = 1.6;
+        /// <summary>
+        /// Largest accepted fit RMS as a fraction of MatchToleranceDeg. Matches that are merely random
+        /// coincidences spread evenly over the tolerance disc (RMS ≈ 0.71 × tolerance); a true solution
+        /// sits far inside it (real frames: 0.04–0.06° against 0.35°).
+        /// </summary>
+        public double MaxRmsFraction { get; set; } = 0.5;
+        /// <summary>
+        /// A solution found by the wide focal sweep has been searched over many more camera models, so
+        /// chance solutions are more likely: it must match this many times the normal minimum.
+        /// </summary>
+        public double WideSearchMatchFactor { get; set; } = 2.0;
     }
 
     public sealed class StarMatch
@@ -62,6 +73,8 @@ namespace StarLocator.Core
         public int Hypotheses { get; init; }
         public int ConsistentLabels { get; init; }
         public double ExpectedRandomMatches { get; init; }
+        /// <summary>Matches needed to accept the orientation (statistical threshold).</summary>
+        public int RequiredMatches { get; init; }
         public long ElapsedMs { get; set; }
     }
 
@@ -99,6 +112,10 @@ namespace StarLocator.Core
             {
                 CameraModel cam = camera.WithAdjustments(fs, camera.K1);
                 IdentificationResult r = IdentifyWithCamera(detections, cam, upDevice, o, fs);
+                bool wide = Array.IndexOf(o.FocalScaleTrials, fs) < 0;
+                if (wide && r.Success && r.Matches.Count < o.WideSearchMatchFactor * r.RequiredMatches)
+                    r = Reject(r, $"Weak match at focal ×{r.FocalScale:F3} ({r.Matches.Count} stars, need " +
+                                  $"{Math.Ceiling(o.WideSearchMatchFactor * r.RequiredMatches)} when the focal length is searched).");
                 totalHyp += r.Hypotheses;
                 if (best == null || Better(r, best)) best = r;
                 if (best.Success && best.Matches.Count >= 2 * o.MinMatches && best.ConsistentLabels >= 2 * o.MinConsistentLabels) break;
@@ -129,6 +146,13 @@ namespace StarLocator.Core
                 yield return fs;
             }
         }
+
+        private static IdentificationResult Reject(IdentificationResult r, string msg) => new IdentificationResult
+        {
+            Success = false, Message = msg, J2000ToDevice = r.J2000ToDevice, Matches = r.Matches, RmsDeg = r.RmsDeg,
+            Camera = r.Camera, FocalScale = r.FocalScale, Hypotheses = r.Hypotheses, ConsistentLabels = r.ConsistentLabels,
+            ExpectedRandomMatches = r.ExpectedRandomMatches, RequiredMatches = r.RequiredMatches
+        };
 
         private static bool Better(IdentificationResult a, IdentificationResult b)
         {
@@ -287,10 +311,13 @@ namespace StarLocator.Core
                 Votes = voteLookup.TryGetValue(m.Det, out double v) ? v : 0
             }).OrderBy(m => m.Star.Mag).ToList();
 
-            bool ok = matches.Count >= needed && consistentFinal >= o.MinConsistentLabels;
             double rms = Rms(set2) * Astronomy.RadToDeg;
+            double maxRms = o.MaxRmsFraction * o.MatchToleranceDeg;
+            bool ok = matches.Count >= needed && consistentFinal >= o.MinConsistentLabels && rms <= maxRms;
             string msg;
             if (ok) msg = $"Identified {matches.Count} stars, RMS {rms:F3}°";
+            else if (rms > maxRms)
+                msg = $"Fit too loose (RMS {rms:F3}° > {maxRms:F3}°): looks like a chance match; orientation not trusted.";
             else if (consistentFinal < o.MinConsistentLabels)
                 msg = $"Only {consistentFinal} voted star labels agree (need {o.MinConsistentLabels}); orientation not trusted.";
             else msg = $"Only {matches.Count} stars matched (need {needed}); orientation not trusted.";
@@ -305,7 +332,8 @@ namespace StarLocator.Core
                 FocalScale = curCam.Fx / cam.Fx * focalScale,
                 Hypotheses = hypotheses,
                 ConsistentLabels = consistentFinal,
-                ExpectedRandomMatches = expected
+                ExpectedRandomMatches = expected,
+                RequiredMatches = needed
             };
         }
 

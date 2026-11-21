@@ -13,7 +13,7 @@ An Android app that works out **where on Earth you are from a photo of the night
 
 Written in C# for .NET 10 for Android. The star-identification core is a platform-independent .NET library.
 
-> **Status:** verified against synthetic sky images and **one real field test** (4 frames from one phone on one night, see [Accuracy](#accuracy)). Long-term stability of the one-time calibration has **not been measured yet**.
+> **Status:** star identification works on real photos (two field tests, 36 frames). **Position accuracy on a real phone is not yet good.** The second field test found that the phone's camera image shifted up to ~1° inside the phone between frames, which no calibration can remove (see [Field test 2](#field-test-2-real-phone-second-night-november-2026)). Version 1.0.7 switches optical image stabilisation off and detects this problem; it has not yet been field-tested.
 
 ---
 
@@ -49,7 +49,7 @@ The main screen has one big round button, the result, and a calibration badge. E
 1. **Go outside on a clear night.** Avoid the Moon and bright lights.
 2. Tap **Locate**. During the countdown (10 s by default) the app beeps once a second. Put the phone **screen-down** in the [60° mount](#3d-printed-60-mount), or on a rock or car roof, so the back camera points **45–90° up** at clear sky.
 3. A higher tone means capturing has started: don't touch the phone. A long tone means it's done and you can pick the phone up. The ring shows progress (countdown, frame 1/4…, identifying stars). Tap it to cancel.
-4. The card shows the fix in degrees-minutes-seconds and decimal degrees, an estimated 1-σ error in km, and how many frames were used. **Open map** passes the fix to any installed map app as a `geo:` link (offline map apps work). **Copy** copies the decimal coordinates. Warnings show under the fix, e.g. "not calibrated" or "phone was 4° off the calibration pose".
+4. The card shows the fix in degrees-minutes-seconds and decimal degrees, an estimated 1-σ error in km, and how many frames were used. **Open map** passes the fix to any installed map app as a `geo:` link (offline map apps work). **Copy** copies the decimal coordinates. Warnings show under the fix, e.g. "not calibrated", "phone was 4° off the calibration pose" or "camera image shifted 0.3° inside the phone" (see [image stability](#image-stability)).
 
 By default the app takes 4 frames at ¼×, ½×, 1× and 2× the set exposure (4 s at ISO 1600 → 1, 2, 4 and 8 s, clamped to what the camera supports). Each frame is solved on its own. Failed frames are skipped, outliers (for example a frame where the phone was bumped) are rejected, and the rest are combined into one fix.
 
@@ -58,9 +58,9 @@ By default the app takes 4 frames at ¼×, ½×, 1× and 2× the set exposure (4
 | Section | What's there |
 |---|---|
 | **Last capture** | Per-frame report (stars detected and identified, fit, motion warnings), the combined result with its random/systematic error split, and the frame with the most identified stars: identified stars circled in green and named, unmatched detections circled in red. |
-| **Capture** | Countdown (Off / 5 s / 10 s), exposure, ISO, exposure bracket on/off. |
+| **Capture** | Camera (when the phone exposes more than one back camera, labelled by 35 mm-equivalent focal length, with whether it has optical stabilisation), countdown (Off / 5 s / 10 s), exposure, ISO, exposure bracket on/off. |
 | **Calibration** | Status, the known-location field, **Use GPS**, **Calibrate**, **Forget calibration**. |
-| **Files** | **Save last capture (.zip)**: frames, camera/accelerometer data and the report as one zip, saved wherever you choose. The zip protects the binary frames, which some apps corrupt when sent as raw `.pgm`. **Keep every captured frame** also stores all frames under `Android/data/io.github.thejaraxlenuke.starlocator/files/frames/`, with save-as-zip and delete buttons. |
+| **Files** | **Save last capture (.zip)**: frames, camera/accelerometer data and the report as one zip, saved wherever you choose. The capture folder also holds `report.txt`, so a zip of the folder made with a file manager is complete too. The zip protects the binary frames, which some apps corrupt when sent as raw `.pgm`. **Keep every captured frame** also stores all frames under `Android/data/io.github.thejaraxlenuke.starlocator/files/frames/`, with save-as-zip and delete buttons. |
 | **Display** | Red night-vision colours. |
 | **Device** | Live camera elevation and calibration-pose check, UTC time, camera capabilities, and the learned lens correction (with reset). |
 
@@ -74,6 +74,10 @@ Uncalibrated fixes are typically **tens of km** off. In the field test that was 
    - Or type it, e.g. `40.68925, -74.0445` or `40°41'21.3"N 74°02'40.2"W`.
 3. Tap **Calibrate**. A normal countdown and bracket follow. The app reports how far off the uncalibrated result was, then saves the correction for this camera.
 4. From then on, use the **same mount, seating and case**. A fix shows a warning when the pose differed from the calibration pose by more than 3°, or the phone's temperature by 10 °C or more. Advanced › Device shows the pose check live.
+
+Calibrations made with versions before 1.0.7 are not used any more: 1.0.7 switches optical stabilisation off, which moves the image centre, so calibrate once more.
+
+The app **refuses a calibration** whose frames disagree with each other by more than 0.1° (≈11 km) after dropping single bad frames, and says why. Such frames mean the camera image is not fixed to the phone body, so there is no constant error to store.
 
 If the calibration frames come from clearly different tilts (≥ 15° apart), the app instead solves the accelerometer bias and camera misalignment separately, and the calibration then works in any pose. In a fixed mount, the pose-specific correction is the simpler and exact one.
 
@@ -98,15 +102,18 @@ The star tracker comes from **Marbel, Ben-Moshe & Yozevitch, "Star-Tracker Algor
 | 1 | **Star detection.** Per-block background and robust noise estimate, threshold, 8-connected components, background-subtracted sub-pixel centroids. Blobs that are too small (hot pixels) or too large (Moon, lamps) are rejected. | `StarDetector.cs` |
 | 2 | **Star Pattern Hash Table** (paper §3.1). Every triplet of catalog stars brighter than magnitude 4.0 whose sides are 1–30° is keyed by its three sorted, quantised angular distances. That is 518 stars and 94,439 triangles, built at start-up in about 0.05 s on a desktop CPU. | `StarPatternHash.cs` |
 | 3 | **Matching + confidence voting** (paper §3.2). Triangles from the 24 brightest detections are looked up with a ±0.4° tolerance. Each catalog match votes for a star label, weighted by 1/(number of matches), so ambiguous triangles count less. | `StarIdentifier.cs` |
-| 4 | **Validation** (paper §3.3). Pairs of voted labels give exact orientation hypotheses (TRIAD). A hypothesis is accepted only if **at least 4 independently voted labels agree** with it and the matched-star count beats chance by more than 5σ. This is what rejects false fixes. | `StarIdentifier.cs` |
+| 4 | **Validation** (paper §3.3). Pairs of voted labels give exact orientation hypotheses (TRIAD). A hypothesis is accepted only if **at least 4 independently voted labels agree** with it, the matched-star count beats chance by more than 5σ, and the fit RMS is under half the match tolerance (chance matches spread over the whole tolerance disc). A solution found by the wide focal-length sweep must match twice as many stars. | `StarIdentifier.cs` |
 | 5 | **Refinement + lens self-calibration.** Least-squares orientation (Davenport q-method) over all matched stars down to magnitude 5.5. The focal length and radial distortion K1 are refined from the stars. If the phone's reported focal length doesn't work, scales 0.90–1.10 are tried, then **0.6–1.6 in 2% steps**: the first real phone tested reported a focal length 26% too short. The app **saves the learned correction per camera**. | `StarIdentifier.cs`, `Attitude.cs` |
 | 6 | **Gravity → zenith.** The accelerometer is averaged over exactly the exposure window to give "up" in the phone frame. Atmospheric refraction is removed per star (Bennett). The solved orientation maps "up" onto the sky. | `PositionSolver.cs`, `Astronomy.cs` |
 | 7 | **Zenith → latitude/longitude.** The zenith is precessed from J2000 to the date (IAU 1976) and rotated by Greenwich Mean Sidereal Time. **Latitude = declination of the zenith; longitude = its right ascension − GMST.** | `Astronomy.cs` |
 | 8 | **Exposure bracket.** Each frame of a capture is solved on its own. Fixes are checked against a robust centre (geometric median); frames more than 3× the robust spread away are rejected; the rest are averaged with 1/σ² weights. Only the random error shrinks with more frames. The systematic part (shared tilt error) is carried through unchanged, so the ± figure stays honest. | `PositionSolver.CombineFixes` |
-| 9 | **One-time calibration at a known position.** With the true zenith known, each frame measures the "up" error directly: `r = a − g·M·z`. From one pose, the mean `r` is stored as a pose-specific correction. From several tilts, `a = g·M·z + [M·z ×]·w′ + b` is solved linearly for local gravity `g`, accelerometer bias `b` and camera misalignment `w` (7 unknowns). | `PositionSolver.CalibrateAtKnownLocation` |
-| 10 | **Reference-free calibration** (library only). If no known position is available, a Gauss-Newton fit over 4+ tilted shots solves for position, bias and misalignment together. | `PositionSolver.SolveMulti` |
+| 9 | **One-time calibration at a known position.** With the true zenith known, each frame measures the "up" error directly: `r = a − g·M·z`. Frames over 5° off and frames far from the median are dropped; if the rest still disagree by more than 0.1° the calibration is refused. From one pose, the mean `r` is stored as a pose-specific correction. From several tilts, `a = g·M·z + [M·z ×]·w′ + b` is solved linearly for local gravity `g`, accelerometer bias `b` and camera misalignment `w` (7 unknowns). | `PositionSolver.CalibrateAtKnownLocation` |
+| 10 | **Image-stability check.** Each frame's zenith direction `Mᵀ·a` stays put when the whole phone moves (camera and accelerometer move together), but shifts if the image moves *inside* the phone. The spread across a capture's frames is reported, and a fix is flagged unreliable above 0.05°. | `PositionSolver.ZenithSpread` |
+| 11 | **Reference-free calibration** (library only). If no known position is available, a Gauss-Newton fit over 4+ tilted shots solves for position, bias and misalignment together. | `PositionSolver.SolveMulti` |
 
-Camera intrinsics come from Android's factory `LENS_INTRINSIC_CALIBRATION` when the phone provides it. Otherwise they come from focal length ÷ sensor size. Lens distortion is corrected by the camera itself where supported, and otherwise from `LENS_DISTORTION`. Exposure uses Camera2 manual mode with focus at infinity, reading the raw luminance (Y) plane.
+Camera intrinsics come from Android's factory `LENS_INTRINSIC_CALIBRATION` when the phone provides it. Otherwise they come from focal length ÷ sensor size. Lens distortion is corrected by the camera itself where supported, and otherwise from `LENS_DISTORTION`. Exposure uses Camera2 manual mode with focus at infinity, reading the raw luminance (Y) plane. Optical image stabilisation, video stabilisation, noise reduction and edge enhancement are switched **off** (where the camera allows), and every frame's sidecar file records what the camera actually applied: OIS mode, the OIS lens-shift samples (Android 12+), the active physical lens of a multi-camera, focal length and focus distance.
+
+[`docs/paper-review.md`](docs/paper-review.md) compares the implementation with the paper section by section.
 
 The star catalog is the **Yale Bright Star Catalog, 5th ed.** (9,096 stars, J2000), embedded in the core library.
 
@@ -125,6 +132,20 @@ One 4-frame bracket (1/2/4/8 s, ISO 2000, camera at 53° elevation, Moon 75% lit
 | Calibrate on two frames, test on the third (same session) | **0.6–1.4 km** |
 
 The real star fit (≈0.04°) is better than the paper's 0.1–0.3°. The same-session calibration test checks the method but **not** how long a calibration stays valid; that needs captures on different nights.
+
+### Field test 2 (real phone, second night, November 2026)
+
+Same phone and place, version 1.0.6, phone in the 60° mount on a clear night: 8 captures, 32 frames (1–16 s, ISO 1600–2400).
+
+| | Result |
+|---|---|
+| Star identification | **32 of 32 frames solved**, 61–80 stars each, fit RMS 0.04–0.06° |
+| Accelerometer | steady to < 0.01° within every capture; elevation 60.1–61.1° |
+| Uncalibrated error per capture | **17–204 km** (very different from capture to capture) |
+| Calibrate on one capture, test on another | **5–280 km**; on the same capture 1–3 km |
+| Camera image vs phone body | **the image moved inside the phone**: up to 0.65° of tilt within a 22 s capture while the accelerometer moved < 0.01°; Polaris shifted 56 px (0.94°). When the phone really moved (bumped, or turned 25° in the mount) camera and accelerometer agreed |
+
+Diagnosis: the "up" error was not a fixed property of the phone but changed from capture to capture (0.17–1.8°) and drifted with exposure length. This matches the camera's optical image stabilisation, which the Camera2 still-capture template leaves on and 1.0.6 did not switch off. It may also be another kind of image stabilisation or processing on that phone. 1.0.7 switches all stabilisation off, logs the lens-shift data where Android provides it, warns about unsteady captures, refuses unsteady calibrations and lets you choose another back camera (ultra-wide lenses usually have no OIS). Whether this cures it on that phone has **not been tested yet**.
 
 ### Simulator
 
@@ -168,6 +189,8 @@ Rules of thumb:
 
 ## Limitations
 
+<a id="image-stability"></a>
+- **The camera image must be rigidly fixed to the phone body**, to about 0.01°. Optical image stabilisation, sensor-shift stabilisation or image warping in the camera software break this: 0.1° of image shift is ≈11 km of error. The app switches what it can off and warns when frames disagree, but some phones may not let apps turn stabilisation off.
 - Works at night only, and needs about 6+ identifiable stars: clear sky, nothing blocking the view.
 - Needs manual exposure (`MANUAL_SENSOR`) on the back camera.
 - Effects ignored because they are far below the sensor limits: nutation (≈17″), annual aberration (≈20″), UT1−UTC (<0.9 s), polar motion, star proper motion and deflection of the vertical.
@@ -248,6 +271,7 @@ src/StarLocator.Android/    Android app (net10.0-android): Camera2 manual captur
 tests/StarLocator.Tests/    Sky simulator, unit + end-to-end tests, robustness sweep, frame replay
 hardware/mount/             3D-printable 60° phone mount (OpenSCAD source, STL, preview)
 art/icon/                   App icon source (SVG); the app uses it as an adaptive vector icon
+docs/paper-review.md        Section-by-section comparison with the Marbel et al. (2020) paper
 .github/workflows/          CI: test, build, verify and release the APK
 ```
 

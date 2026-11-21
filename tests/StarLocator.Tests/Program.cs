@@ -32,6 +32,7 @@ namespace StarLocator.Tests
             TestBracket(locator);
             TestWideFocal(locator);
             TestKnownLocationCalibration(locator);
+            TestImageStability(locator);
 
             Console.WriteLine(_failures == 0 ? "ALL TESTS PASSED" : $"{_failures} TEST(S) FAILED");
             return _failures == 0 ? 0 : 1;
@@ -365,6 +366,61 @@ namespace StarLocator.Tests
                 worst = Math.Max(worst, double.IsNaN(e) ? 1e9 : e);
             }
             Check(worst < 8, $"Any pose after full calibration: worst {worst:F1} km < 8 km");
+        }
+
+        /// <summary>
+        /// Field test 2 (Nov 2026): the camera image shifted up to ~1° inside the phone between frames
+        /// (optical stabilisation) while the accelerometer showed no movement. Simulated here as a camera
+        /// misalignment that changes from frame to frame.
+        /// </summary>
+        private static void TestImageStability(CelestialLocator loc)
+        {
+            Console.WriteLine("Image stability: camera image moving inside the phone vs the phone itself moving");
+            double lat = 42.6526, lon = -73.7562;
+            var t0 = new DateTime(2026, 11, 21, 1, 0, 0, DateTimeKind.Utc);
+            Vec3 bias = new Vec3(0.05, -0.04, 0.02);
+            Shot? Make(int k, double alt, double az, Vec3 mis, int seed)
+            {
+                var sc = new Scenario { LatDeg = lat, LonDeg = lon, Utc = t0.AddSeconds(4 * k), AltitudeDeg = alt, AzimuthDeg = az,
+                                        LimitingMag = 4.5, AccelBias = bias, CameraMisalignment = mis, PositionJitterPx = 1, Seed = seed };
+                SyntheticFrame f = SkySimulator.Render(loc.Catalog, PhoneCamera(0), sc);
+                return loc.ProcessFrame(f.Luma, f.Width, f.Height, f.Width, PhoneCamera(0), f.Gravity, sc.Utc).Shot;
+            }
+            Vec3 baseMis = new Vec3(0.2, -0.1, 0.05).Normalized() * (0.3 * Astronomy.DegToRad);
+
+            // 1) Steady camera, phone tilted differently between frames: zeniths must still agree.
+            var moved = new List<Shot>();
+            double[] alts = { 60, 57, 63, 60 };
+            for (int k = 0; k < 4; k++) { Shot? s = Make(k, alts[k], 30 + 3 * k, baseMis, 9000 + k); if (s != null) moved.Add(s); }
+            var (rmsM, maxM) = PositionSolver.ZenithSpread(moved);
+            Check(moved.Count == 4 && maxM < PositionSolver.StabilityWarnDeg,
+                  $"Phone physically moved 6° between frames, camera steady: zenith spread {maxM:F3}° (no warning)");
+
+            // 2) Phone still, image drifting 0.15° per frame (like the field test): warning + calibration refused.
+            var drift = new List<Shot>();
+            for (int k = 0; k < 4; k++)
+            {
+                Vec3 mis = baseMis + new Vec3(1, 0.4, 0).Normalized() * (0.15 * k * Astronomy.DegToRad);
+                Shot? s = Make(k, 60, 30, mis, 9100 + k);
+                if (s != null) drift.Add(s);
+            }
+            var (rmsD, maxD) = PositionSolver.ZenithSpread(drift);
+            Check(drift.Count == 4 && maxD > PositionSolver.StabilityWarnDeg, $"Image drifting inside the phone: zenith spread {maxD:F3}° (warning)");
+            SensorCalibration? bad = PositionSolver.CalibrateAtKnownLocation(drift, lat, lon, "test", double.NaN, out string msgBad);
+            Console.WriteLine("    " + msgBad);
+            Check(bad == null, "Calibration refused when the frames disagree");
+
+            // 3) Steady capture with one jumped frame: that frame is dropped and calibration still works.
+            var oneBad = new List<Shot>();
+            for (int k = 0; k < 4; k++)
+            {
+                Vec3 mis = k == 3 ? baseMis + new Vec3(0, 1, 0) * (0.5 * Astronomy.DegToRad) : baseMis;
+                Shot? s = Make(k, 60, 30, mis, 9200 + k);
+                if (s != null) oneBad.Add(s);
+            }
+            SensorCalibration? ok = PositionSolver.CalibrateAtKnownLocation(oneBad, lat, lon, "test", double.NaN, out string msgOk);
+            Console.WriteLine("    " + msgOk);
+            Check(ok != null && ok.Shots == oneBad.Count - 1 && ok.SpreadDeg < 0.05, "One jumped frame is rejected; calibration from the rest");
         }
 
         private static void TestReplay(CelestialLocator loc)

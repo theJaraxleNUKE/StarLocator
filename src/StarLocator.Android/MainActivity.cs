@@ -155,9 +155,13 @@ namespace StarLocator.Droid
                     _camera = new CameraCapture(this);
                     _camera.StatusChanged += msg => RunOnUiThread(() => { _cameraNote = msg; RefreshDeviceInfo(); });
                 }
-                _camera.Open();
+                _camera.Open(Storage.GetSetting(this, "camera", ""));
                 _calibration = Storage.LoadCalibration(this, _camera.CameraId);
                 RefreshAll();
+                if (_calibration == null && Storage.HasObsoleteCalibration(this, _camera.CameraId) && Session.LastFix == null)
+                    ShowMessage("Please calibrate again",
+                        "This version turns the camera's image stabilisation off, which moves the image centre. " +
+                        "The old calibration no longer applies.", _ui.P.Warn);
                 if (_camera.Info != null && !_camera.Info.ManualSensor && Session.LastFix == null)
                     ShowMessage("Limited camera", "This camera has no manual exposure, so long star exposures may not work.", _ui.P.Warn);
             }
@@ -175,6 +179,8 @@ namespace StarLocator.Droid
             public List<Shot> Shots { get; } = new List<Shot>();
             public Vec3 MeanGravity { get; set; }
             public int Frames { get; set; }
+            /// <summary>Largest disagreement (degrees) between the frames' zenith directions; see PositionSolver.ZenithSpread.</summary>
+            public double StabilityMaxDeg { get; set; }
         }
 
         private void OnRingTapped()
@@ -256,6 +262,9 @@ namespace StarLocator.Droid
                         {
                             warnings.Add("Not calibrated: expect tens of km of error");
                         }
+                        if (o.StabilityMaxDeg > PositionSolver.StabilityWarnDeg)
+                            warnings.Add($"Camera image shifted {o.StabilityMaxDeg:F2}° inside the phone between frames: " +
+                                         "this fix is unreliable (try another camera in Advanced)");
                         Session.LastFix = combined;
                         Session.LastFixLocal = DateTime.Now;
                         title = "Fix";
@@ -275,7 +284,21 @@ namespace StarLocator.Droid
                 }
                 string header = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} — {(calibrate ? "calibration" : "capture")}: {title}\n";
                 Session.LastReport = header + o.Report;
-                Session.LastSummary = $"{DateTime.UtcNow:o} UTC\n{Session.LastReport}\nCalibration: {(_calibration?.ToString() ?? "none")}\n";
+                Session.LastSummary = $"Star Locator {AppVersion()} — {DateTime.UtcNow:o} UTC\n" +
+                                      $"Camera {_camera.CameraId}: {info.Describe()}\n{Session.LastReport}\n" +
+                                      $"Calibration: {(_calibration?.ToString() ?? "none")}\n";
+                // Keep the report with the frames so a zip of the folder is self-explanatory.
+                string summary = Session.LastSummary, stamp = DateTime.UtcNow.ToString("yyyyMMdd_HHmmss", Inv);
+                bool keepReport = _keepFrames;
+                await Task.Run(() =>
+                {
+                    try
+                    {
+                        Storage.SaveReport(Storage.LastCaptureDir(this), "report.txt", summary);
+                        if (keepReport) Storage.SaveReport(Storage.KeptFramesDir(this), $"report_{stamp}.txt", summary);
+                    }
+                    catch (System.IO.IOException) { }
+                });
             }
             catch (System.OperationCanceledException)
             {
@@ -373,6 +396,8 @@ namespace StarLocator.Droid
                     IdentificationResult id = r.Identification;
                     o.Report.Append($"{id.Matches.Count} identified, fit {id.RmsDeg:F3}°");
                     if (g.StdDev > 0.06) o.Report.Append($", ⚠ moved (σ {g.StdDev:F2} m/s²)");
+                    if (frame.Diagnostics.TryGetValue("oisMode", out string? ois)) o.Report.Append(ois == "0" ? ", OIS off" : ", ⚠ OIS ON");
+                    if (frame.Diagnostics.TryGetValue("oisShiftPx", out string? shift)) o.Report.Append($", OIS shift {shift} px");
                     o.Report.Append('\n');
                     o.Fixes.Add(r.Fix);
                     o.Shots.Add(r.Shot);
@@ -389,6 +414,15 @@ namespace StarLocator.Droid
             }
             o.MeanGravity = gSum;
             frames.Clear();
+
+            // ---- Was the image steady relative to the phone? ---------------------------------
+            if (o.Shots.Count >= 2)
+            {
+                var (zRms, zMax) = PositionSolver.ZenithSpread(o.Shots);
+                o.StabilityMaxDeg = zMax;
+                o.Report.Append(string.Format(Inv, "Image stability: frames agree within {0:F3}° (RMS {1:F3}°){2}\n", zMax, zRms,
+                    zMax > PositionSolver.StabilityWarnDeg ? " ⚠ the image moved inside the phone" : ""));
+            }
 
             // ---- Remember the lens focal-length correction the stars revealed ---------------
             if (learned.Count > 0)
@@ -570,6 +604,25 @@ namespace StarLocator.Droid
             var cm = GetSystemService(ClipboardService) as Android.Content.ClipboardManager;
             if (cm != null) cm.PrimaryClip = ClipData.NewPlainText("Star fix", text);
             Toast.MakeText(this, "Coordinates copied", ToastLength.Short)?.Show();
+        }
+
+        private string AppVersion()
+        {
+            try
+            {
+#pragma warning disable CS0618, CA1422
+                return PackageManager?.GetPackageInfo(PackageName ?? "", 0)?.VersionName ?? "?";
+#pragma warning restore CS0618, CA1422
+            }
+            catch (Exception) { return "?"; }
+        }
+
+        private void SelectCamera(string id)
+        {
+            if (_busy || _camera?.CameraId == id) return;
+            SaveSetting("camera", id);
+            _camera?.Close();
+            OpenCamera();
         }
 
         private static double ParseDouble(string? s, double fallback) =>

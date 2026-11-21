@@ -19,6 +19,17 @@ namespace StarLocator.Droid
 
         // ---- Calibration ------------------------------------------------------------------------
 
+        /// <summary>
+        /// Calibrations are stored per camera AND per capture configuration. Version 1.0.7 turned optical
+        /// stabilisation off, which moves the image centre, so calibrations made before that ("cal_")
+        /// are deliberately no longer loaded.
+        /// </summary>
+        private const string CalPrefix = "cal2_";
+
+        /// <summary>True if a calibration from a version before 1.0.7 exists for this camera.</summary>
+        public static bool HasObsoleteCalibration(Context ctx, string cameraId) =>
+            !string.IsNullOrEmpty(P(ctx).GetString("cal_" + cameraId, null));
+
         public static void SaveCalibration(Context ctx, string cameraId, SensorCalibration cal)
         {
             var kv = new Dictionary<string, string>
@@ -32,18 +43,21 @@ namespace StarLocator.Droid
                 ["ticks"] = cal.CreatedUtc.Ticks.ToString(Inv),
                 ["temp"] = R(cal.TemperatureC),
                 ["err"] = R(cal.ErrorBeforeKm),
+                ["spread"] = R(cal.SpreadDeg),
+                ["offered"] = cal.ShotsOffered.ToString(Inv),
                 ["method"] = cal.Method.Replace(";", ",").Replace("=", "-")
             };
             var sb = new StringBuilder();
             foreach (var p in kv) sb.Append(p.Key).Append('=').Append(p.Value).Append(';');
             ISharedPreferencesEditor e = P(ctx).Edit()!;
-            e.PutString("cal_" + cameraId, sb.ToString());
+            e.PutString(CalPrefix + cameraId, sb.ToString());
+            e.Remove("cal_" + cameraId);
             e.Apply();
         }
 
         public static SensorCalibration? LoadCalibration(Context ctx, string cameraId)
         {
-            string? v = P(ctx).GetString("cal_" + cameraId, null);
+            string? v = P(ctx).GetString(CalPrefix + cameraId, null);
             if (string.IsNullOrEmpty(v)) return null;
             try
             {
@@ -79,6 +93,8 @@ namespace StarLocator.Droid
                     CreatedUtc = new DateTime(long.Parse(kv["ticks"], Inv), DateTimeKind.Utc),
                     TemperatureC = D("temp"),
                     ErrorBeforeKm = D("err"),
+                    SpreadDeg = kv.ContainsKey("spread") ? D("spread") : double.NaN,
+                    ShotsOffered = kv.ContainsKey("offered") ? int.Parse(kv["offered"], Inv) : 0,
                     Method = kv["method"]
                 };
             }
@@ -92,6 +108,7 @@ namespace StarLocator.Droid
         {
             ISharedPreferencesEditor e = P(ctx).Edit()!;
             e.Remove("cal_" + cameraId);
+            e.Remove(CalPrefix + cameraId);
             e.Apply();
         }
 
@@ -176,8 +193,17 @@ namespace StarLocator.Droid
             Kv("ax", g.Mean.X); Kv("ay", g.Mean.Y); Kv("az", g.Mean.Z); Kv("astd", g.StdDev); Kv("asamples", g.Samples);
             Kv("exposureNs", f.ExposureNs); Kv("iso", f.Iso);
             sb.Append("cameraModelSource=").Append(f.CameraModelSource).Append('\n');
+            sb.Append("preciseTiming=").Append(f.PreciseTiming ? "1" : "0").Append('\n');
+            foreach (var d in f.Diagnostics) sb.Append(d.Key).Append('=').Append(d.Value.Replace('\n', ' ')).Append('\n');
             File.WriteAllText(Path.Combine(dir, name + ".txt"), sb.ToString());
             return pgm;
+        }
+
+        /// <summary>Writes the human-readable capture report next to the frames.</summary>
+        public static void SaveReport(string dir, string name, string text)
+        {
+            Directory.CreateDirectory(dir);
+            File.WriteAllText(Path.Combine(dir, name), text, new UTF8Encoding(false));
         }
 
         /// <summary>Zips every file of a folder (plus a summary) into the given stream. Returns the file count.</summary>

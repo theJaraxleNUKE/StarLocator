@@ -29,6 +29,16 @@ namespace StarLocator.Droid
         public long EndRealtimeNs { get; init; }
         public DateTime UtcMidExposure { get; init; }
         public bool PreciseTiming { get; init; }
+        /// <summary>What the camera actually did (from the capture result): OIS mode, OIS lens shifts, NR, lens, physical camera…</summary>
+        public Dictionary<string, string> Diagnostics { get; init; } = new Dictionary<string, string>();
+    }
+
+    /// <summary>A back-facing camera the user can choose.</summary>
+    public sealed class BackCamera
+    {
+        public string Id { get; init; } = "";
+        public CameraInfo Info { get; init; } = null!;
+        public string Label { get; init; } = "";
     }
 
     /// <summary>
@@ -40,7 +50,8 @@ namespace StarLocator.Droid
     {
         // Camera2 constant values.
         private const int ControlModeOff = 0;
-        private const int AeModeOff = 0, AfModeOff = 0, NoiseReductionFast = 1;
+        private const int AeModeOff = 0, AfModeOff = 0;
+        private static readonly System.Globalization.CultureInfo Inv = System.Globalization.CultureInfo.InvariantCulture;
 
         private readonly Context _context;
         private readonly CameraManager _manager;
@@ -54,6 +65,9 @@ namespace StarLocator.Droid
         private int _pendingIso;
         private long _requestRealtimeNs;
         private bool _usedFallbackSize;
+        // A frame is complete when both the image and its capture result have arrived.
+        private CapturedFrame? _pendingFrame;
+        private Dictionary<string, string>? _pendingDiag;
 
         public CameraInfo? Info { get; private set; }
         public string CameraId { get; private set; } = "";
@@ -69,14 +83,32 @@ namespace StarLocator.Droid
             _manager = context.GetSystemService(Context.CameraService)!.JavaCast<CameraManager>()!;
         }
 
-        public void Open()
+        /// <summary>All back-facing cameras Camera2 exposes, with a short label for each.</summary>
+        public static List<BackCamera> ListBackCameras(Context context)
+        {
+            var manager = context.GetSystemService(Context.CameraService)!.JavaCast<CameraManager>()!;
+            var list = new List<BackCamera>();
+            foreach (string id in manager.GetCameraIdList())
+            {
+                CameraCharacteristics c = manager.GetCameraCharacteristics(id);
+                Java.Lang.Object? facing = c.Get(CameraCharacteristics.LensFacing);
+                if (facing == null || facing.JavaCast<Java.Lang.Integer>()!.IntValue() != CameraInfo.LensFacingBack) continue;
+                CameraInfo info = CameraInfo.Read(c);
+                string label = !double.IsNaN(info.EquivalentFocalMm) ? $"{info.EquivalentFocalMm:F0} mm" : $"Cam {id}";
+                list.Add(new BackCamera { Id = id, Info = info, Label = label });
+            }
+            return list;
+        }
+
+        /// <summary>Opens the preferred back camera (or the first back camera if it is not available).</summary>
+        public void Open(string? preferredId = null)
         {
             Close();
             _thread = new HandlerThread("StarLocatorCamera");
             _thread.Start();
             _handler = new Handler(_thread.Looper!);
 
-            CameraId = FindBackCamera();
+            CameraId = FindBackCamera(preferredId);
             CameraCharacteristics chars = _manager.GetCameraCharacteristics(CameraId);
             Info = CameraInfo.Read(chars);
 
@@ -97,9 +129,14 @@ namespace StarLocator.Droid
             _reader.SetOnImageAvailableListener(new ImageListener(this), _handler);
         }
 
-        private string FindBackCamera()
+        private string FindBackCamera(string? preferredId)
         {
             string[] ids = _manager.GetCameraIdList();
+            if (!string.IsNullOrEmpty(preferredId) && Array.IndexOf(ids, preferredId) >= 0)
+            {
+                Java.Lang.Object? pf = _manager.GetCameraCharacteristics(preferredId).Get(CameraCharacteristics.LensFacing);
+                if (pf != null && pf.JavaCast<Java.Lang.Integer>()!.IntValue() == CameraInfo.LensFacingBack) return preferredId;
+            }
             foreach (string id in ids)
             {
                 CameraCharacteristics c = _manager.GetCameraCharacteristics(id);
@@ -173,6 +210,8 @@ namespace StarLocator.Droid
             iso = Math.Clamp(iso, Info.MinIso, Info.MaxIso);
             var tcs = new TaskCompletionSource<CapturedFrame>(TaskCreationOptions.RunContinuationsAsynchronously);
             _pending = tcs;
+            _pendingFrame = null;
+            _pendingDiag = null;
             _pendingExposureNs = exposureNs;
             _pendingIso = iso;
 
@@ -192,7 +231,19 @@ namespace StarLocator.Droid
                 Put(b, CaptureRequest.ControlAfMode, Java.Lang.Integer.ValueOf(AfModeOff));
                 Put(b, CaptureRequest.LensFocusDistance, Java.Lang.Float.ValueOf(0f));
             }
-            Put(b, CaptureRequest.NoiseReductionMode, Java.Lang.Integer.ValueOf(NoiseReductionFast));
+            // The image must stay rigidly fixed to the phone body (and so to the accelerometer).
+            // Field test 2 showed the image shifting up to ~1° between frames with stabilisation left
+            // at the still-capture default, so every kind of stabilisation is switched off.
+            if (Info.OisModes.Length > 0)
+                Put(b, CaptureRequest.LensOpticalStabilizationMode, Java.Lang.Integer.ValueOf(CameraInfo.OisOff));
+            Put(b, CaptureRequest.ControlVideoStabilizationMode, Java.Lang.Integer.ValueOf(CameraInfo.VideoStabOff));
+            if (OperatingSystem.IsAndroidVersionAtLeast(31) && Info.OisDataAvailable)
+                Put(b, CaptureRequest.StatisticsOisDataMode, Java.Lang.Integer.ValueOf(CameraInfo.OisDataOn));
+            // Minimal processing: no noise-reduction or sharpening filters that could move star centroids.
+            int nr = Array.IndexOf(Info.NoiseReductionModes, CameraInfo.NoiseReductionOff) >= 0 ? CameraInfo.NoiseReductionOff : CameraInfo.NoiseReductionFast;
+            Put(b, CaptureRequest.NoiseReductionMode, Java.Lang.Integer.ValueOf(nr));
+            if (Array.IndexOf(Info.EdgeModes, CameraInfo.EdgeOff) >= 0)
+                Put(b, CaptureRequest.EdgeMode, Java.Lang.Integer.ValueOf(CameraInfo.EdgeOff));
             if (OperatingSystem.IsAndroidVersionAtLeast(28) && Info.DistortionCorrectionMode != 0)
                 Put(b, CaptureRequest.DistortionCorrectionMode, Java.Lang.Integer.ValueOf(Info.DistortionCorrectionMode));
 
@@ -202,10 +253,12 @@ namespace StarLocator.Droid
             // Safety timeout: exposure + 15 s.
             long timeoutMs = exposureNs / 1_000_000 + 15_000;
             Task.Delay(TimeSpan.FromMilliseconds(timeoutMs)).ContinueWith(_ =>
-            {
-                if (ReferenceEquals(_pending, tcs) && tcs.TrySetException(new TimeoutException("Camera did not deliver the frame.")))
-                    _pending = null;
-            });
+                _handler?.Post(() =>
+                {
+                    if (!ReferenceEquals(_pending, tcs)) return;
+                    if (_pendingFrame != null) { Complete(); return; }   // image arrived, result never did
+                    if (tcs.TrySetException(new TimeoutException("Camera did not deliver the frame."))) _pending = null;
+                }));
             return tcs.Task;
         }
 
@@ -248,15 +301,22 @@ namespace StarLocator.Droid
                 DateTime utcMid = arrivalUtc - TimeSpan.FromTicks((arrivalRt - mid) / 100);
 
                 CameraModel model = Info.BuildModel(w, h, out string source);
-                var frame = new CapturedFrame
+                _pendingFrame = new CapturedFrame
                 {
                     Luma = data, Width = w, Height = h, RowStride = yPlane.RowStride,
                     Camera = model, CameraModelSource = source,
                     ExposureNs = _pendingExposureNs, Iso = _pendingIso,
                     StartRealtimeNs = start, EndRealtimeNs = end, UtcMidExposure = utcMid, PreciseTiming = precise
                 };
-                _pending = null;
-                tcs.TrySetResult(frame);
+                _pendingFrame.Diagnostics["cameraId"] = CameraId;
+                _pendingFrame.Diagnostics["imageTimestampNs"] = image.Timestamp.ToString(Inv);
+                if (_pendingDiag != null) Complete();
+                else
+                {
+                    // The capture result normally arrives first; give it a moment if it hasn't.
+                    TaskCompletionSource<CapturedFrame> mine = tcs;
+                    _handler?.PostDelayed(() => { if (ReferenceEquals(_pending, mine) && _pendingFrame != null) Complete(); }, 1500);
+                }
             }
             catch (Exception ex)
             {
@@ -267,6 +327,83 @@ namespace StarLocator.Droid
             {
                 image.Close();
             }
+        }
+
+        /// <summary>Delivers the pending frame (with whatever diagnostics arrived). Runs on the camera thread.</summary>
+        private void Complete()
+        {
+            TaskCompletionSource<CapturedFrame>? tcs = _pending;
+            CapturedFrame? frame = _pendingFrame;
+            if (tcs == null || frame == null) return;
+            if (_pendingDiag != null) foreach (var kv in _pendingDiag) frame.Diagnostics[kv.Key] = kv.Value;
+            else frame.Diagnostics["captureResult"] = "missing";
+            _pending = null;
+            _pendingFrame = null;
+            _pendingDiag = null;
+            tcs.TrySetResult(frame);
+        }
+
+        /// <summary>Records what the camera really applied for this frame.</summary>
+        private void OnCaptureCompleted(TotalCaptureResult result)
+        {
+            if (_pending == null) return;
+            var d = new Dictionary<string, string>();
+            void Int(string name, CaptureResult.Key? key)
+            {
+                Java.Lang.Object? o = key == null ? null : result.Get(key);
+                if (o != null) d[name] = o.JavaCast<Java.Lang.Number>()!.LongValue().ToString(Inv);
+            }
+            void Flt(string name, CaptureResult.Key? key)
+            {
+                Java.Lang.Object? o = key == null ? null : result.Get(key);
+                if (o != null) d[name] = o.JavaCast<Java.Lang.Number>()!.DoubleValue().ToString("R", Inv);
+            }
+            try
+            {
+                Int("oisMode", CaptureResult.LensOpticalStabilizationMode);
+                Int("videoStabMode", CaptureResult.ControlVideoStabilizationMode);
+                Int("noiseReductionMode", CaptureResult.NoiseReductionMode);
+                Int("edgeMode", CaptureResult.EdgeMode);
+                Int("distortionCorrectionMode", OperatingSystem.IsAndroidVersionAtLeast(28) ? CaptureResult.DistortionCorrectionMode : null);
+                Int("resultExposureNs", CaptureResult.SensorExposureTime);
+                Int("resultIso", CaptureResult.SensorSensitivity);
+                Int("sensorTimestampNs", CaptureResult.SensorTimestamp);
+                Flt("lensFocalLengthMm", CaptureResult.LensFocalLength);
+                Flt("lensFocusDistanceDiopters", CaptureResult.LensFocusDistance);
+                if (OperatingSystem.IsAndroidVersionAtLeast(29))
+                {
+                    Java.Lang.Object? phys = result.Get(CaptureResult.LogicalMultiCameraActivePhysicalId);
+                    if (phys != null) d["activePhysicalCameraId"] = phys.ToString();
+                }
+                if (OperatingSystem.IsAndroidVersionAtLeast(31))
+                {
+                    Java.Lang.Object? o = result.Get(CaptureResult.StatisticsOisSamples);
+                    if (o != null)
+                    {
+                        Java.Lang.Object[] arr = JNIEnv.GetArray<Java.Lang.Object>(o.Handle) ?? Array.Empty<Java.Lang.Object>();
+                        double minX = double.MaxValue, maxX = double.MinValue, minY = double.MaxValue, maxY = double.MinValue, sx = 0, sy = 0;
+                        int n = 0;
+                        foreach (Java.Lang.Object item in arr)
+                        {
+                            OisSample? s = item.JavaCast<OisSample>();
+                            if (s == null) continue;
+                            minX = Math.Min(minX, s.Xshift); maxX = Math.Max(maxX, s.Xshift);
+                            minY = Math.Min(minY, s.Yshift); maxY = Math.Max(maxY, s.Yshift);
+                            sx += s.Xshift; sy += s.Yshift; n++;
+                        }
+                        d["oisSamples"] = n.ToString(Inv);
+                        if (n > 0)
+                            d["oisShiftPx"] = string.Format(Inv, "mean {0:F2},{1:F2} x[{2:F2},{3:F2}] y[{4:F2},{5:F2}]",
+                                                            sx / n, sy / n, minX, maxX, minY, maxY);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                d["resultError"] = ex.GetType().Name + ": " + ex.Message;
+            }
+            _pendingDiag = d;
+            if (_pendingFrame != null) Complete();
         }
 
         private void OnCaptureFailed(string reason)
@@ -285,6 +422,8 @@ namespace StarLocator.Droid
             _reader = null;
             _pending?.TrySetCanceled();
             _pending = null;
+            _pendingFrame = null;
+            _pendingDiag = null;
             _usedFallbackSize = false;
             if (_thread != null)
             {
@@ -335,6 +474,9 @@ namespace StarLocator.Droid
 
             public override void OnCaptureFailed(CameraCaptureSession session, CaptureRequest request, CaptureFailure failure) =>
                 _owner.OnCaptureFailed("reason " + failure.Reason);
+
+            public override void OnCaptureCompleted(CameraCaptureSession session, CaptureRequest request, TotalCaptureResult result) =>
+                _owner.OnCaptureCompleted(result);
         }
 
         private sealed class ImageListener : Java.Lang.Object, ImageReader.IOnImageAvailableListener
