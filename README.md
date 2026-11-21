@@ -44,7 +44,7 @@ Each release also has a `.sha256` file for checking the download.
 
 ## Using the app
 
-The main screen has one big round button, the result, a calibration badge, and two buttons at the top: **History** and **Advanced**. There is no camera preview: in the mount the screen faces down, so the app signals with beeps instead.
+The main screen has one big round button, the result, a calibration badge, and two buttons at the top: **History** and **Advanced**. At launch a short opening animation assembles the logo (the centre star spins in from the side); tap to skip it. It is skipped when the phone's animations are turned off. There is no camera preview: in the mount the screen faces down, so the app signals with beeps instead.
 
 1. **Go outside on a clear night.** Avoid the Moon and bright lights.
 2. Tap **Locate**. During the countdown (10 s by default) the app beeps once a second. Put the phone **screen-down** in the [60° mount](#3d-printed-60-mount), or on a rock or car roof, so the back camera points **45–90° up** at clear sky.

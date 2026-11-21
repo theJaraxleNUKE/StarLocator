@@ -66,7 +66,7 @@ namespace StarLocator.Droid
             }
         }
 
-        private void BuildScreens()
+        private void BuildScreens(bool showSplash)
         {
             Palette p = _ui.P;
             var root = new FrameLayout(this);
@@ -80,6 +80,12 @@ namespace StarLocator.Droid
             root.AddView(_advancedScreen, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.MatchParent));
             root.AddView(_historyScreen, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.MatchParent));
             root.SetOnApplyWindowInsetsListener(new InsetsListener());
+            if (showSplash)
+            {
+                var splash = new SplashView(this, p, () => { });
+                root.AddView(splash, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.MatchParent));
+                splash.Post(splash.Start);
+            }
             SetContentView(root);
 #pragma warning disable CS0618, CA1422 // Ignored (bars are transparent) on Android 15+, still used below it.
             Window?.SetStatusBarColor(p.Bg);

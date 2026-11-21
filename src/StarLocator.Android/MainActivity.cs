@@ -32,7 +32,7 @@ namespace StarLocator.Droid
 
     [Activity(Label = "Star Locator", MainLauncher = true, Exported = true,
               ScreenOrientation = ScreenOrientation.Portrait,
-              Theme = "@android:style/Theme.Material.NoActionBar")]
+              Theme = "@style/Theme.StarLocator")]
     public partial class MainActivity : Activity
     {
         private const int CameraPermissionRequest = 42;
@@ -67,7 +67,7 @@ namespace StarLocator.Droid
             _handler = new Handler(Looper.MainLooper!);
             LoadSettings();
             _ui = new Ui(this, _redMode ? Palette.Red : Palette.Night);
-            BuildScreens();
+            BuildScreens(showSplash: savedInstanceState == null && !SplashView.AnimationsDisabled(this));
 
             _gravity = new GravitySampler(this);
             _handler.PostDelayed(UpdateLive, 500);

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Dark window from the first frame, so launching never flashes a grey or white screen. -->
+    <style name="Theme.StarLocator" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/starlocator_bg</item>
+        <item name="android:colorBackground">@color/starlocator_bg</item>
+        <item name="android:statusBarColor">@color/starlocator_bg</item>
+        <item name="android:navigationBarColor">@color/starlocator_bg</item>
+    </style>
+</resources>
